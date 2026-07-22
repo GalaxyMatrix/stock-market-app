@@ -4,7 +4,7 @@ import { NAV_LINKS } from '@/lib/constants'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
 
-const Navbar = () => {
+const NavItems = () => {
   const pathname = usePathname() 
 
 
@@ -34,4 +34,4 @@ const Navbar = () => {
   )
 }
 
-export default Navbar
+export default NavItems
