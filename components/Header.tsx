@@ -3,7 +3,8 @@ import Image from "next/image"
 import Navbar from "./NavItems"
 import Userdropdown from "./Userdropdown"
 
-const Header = () => {
+
+const Header = ({user}: {user: User}) => {
   return (
     <header className="sticky top-0 header">
         <div className="container header-wrapper">
@@ -14,7 +15,7 @@ const Header = () => {
               <Navbar />
 
             </nav>
-          <Userdropdown />
+          <Userdropdown user={user} />
         </div>
     </header>
   )
