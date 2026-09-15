@@ -16,7 +16,7 @@ import { useRouter } from "next/navigation"
 import NavItems from "@/components/NavItems";
 import { signOut } from "@/lib/actions/auth_actions";
 
-const Userdropdown = ({user}: {user: User}) => {
+const Userdropdown = ({user, initialStocks}: {user: User, initialStocks: StockWithWatchlistStatus[]}) => {
   const  router = useRouter();
 
   const handleSignOut = async () => {
@@ -75,7 +75,7 @@ const Userdropdown = ({user}: {user: User}) => {
     </DropdownMenuItem>
     <DropdownMenuSeparator className="bg-grey-600" />
     <nav className="sm:hidden">
-      <NavItems />
+      <NavItems initialStocks={initialStocks} />
 
     </nav>
     
