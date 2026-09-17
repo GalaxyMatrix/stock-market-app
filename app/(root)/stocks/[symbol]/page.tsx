@@ -1,8 +1,8 @@
-import { headers } from 'next/headers';
-import { auth } from '@/lib/better-auth/auth';
-import { getWatchlistSymbolsByEmail } from '@/lib/actions/watchlist.actions';
 import WatchlistButton from "@/components/WatchlistButton";
 import TradingViewWidget from "@/components/TradingViewWidget";
+import { WatchlistItem } from "@/database/models/watchlist.model";
+import { getStocksDetails } from "@/lib/actions/finnhub.actions";
+import { getUserWatchlist } from "@/lib/actions/watchlist.actions";
 import {
   SYMBOL_INFO_WIDGET_CONFIG,
   CANDLE_CHART_WIDGET_CONFIG,
@@ -10,19 +10,25 @@ import {
   TECHNICAL_ANALYSIS_WIDGET_CONFIG,
   COMPANY_PROFILE_WIDGET_CONFIG,
   COMPANY_FINANCIALS_WIDGET_CONFIG,
-} from '@/lib/constants';
+} from "@/lib/constants";
+import { notFound } from "next/navigation";
 
-const WIDGET_BASE = 'https://s3.tradingview.com/external-embedding/embed-widget-';
+const WIDGET_BASE = "https://s3.tradingview.com/external-embedding/embed-widget-";
 
 const StockDetails = async ({ params }: StockDetailsPageProps) => {
   const { symbol } = await params;
   const upperSymbol = symbol.toUpperCase();
 
-  const session = await auth.api.getSession({ headers: await headers() });
-  const email = session?.user?.email ?? '';
+  const [stockData, watchlist] = await Promise.all([
+    getStocksDetails(upperSymbol),
+    getUserWatchlist(),
+  ]);
 
-  const watchlistSymbols = email ? await getWatchlistSymbolsByEmail(email) : [];
-  const isInWatchlist = watchlistSymbols.includes(upperSymbol);
+  if (!stockData) notFound();
+
+  const isInWatchlist = watchlist.some(
+    (item: WatchlistItem) => item.symbol === upperSymbol
+  );
 
   return (
     <div className="stock-details-wrapper">
@@ -53,8 +59,8 @@ const StockDetails = async ({ params }: StockDetailsPageProps) => {
 
         <section className="stock-details-right">
           <WatchlistButton
-            symbol={upperSymbol}
-            company={upperSymbol}
+            symbol={stockData.symbol}
+            company={stockData.company}
             isInWatchlist={isInWatchlist}
           />
           <TradingViewWidget
