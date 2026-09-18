@@ -194,6 +194,42 @@ export const searchStocks = cache(async (query?: string): Promise<StockWithWatch
   }
 });
 
+export const getStockVolumeData = cache(async (symbol: string) => {
+  const cleanSymbol = symbol.trim().toUpperCase();
+  const token = process.env.FINNHUB_API_KEY ?? NEXT_PUBLIC_FINNHUB_API_KEY;
+
+  if (!token) {
+    throw new Error('FINNHUB API key is not configured');
+  }
+
+  try {
+    const to = Math.floor(Date.now() / 1000);
+    const from = to - 60 * 60 * 24 * 5; // last 5 days, in case today's candle isn't published yet
+
+    const [candles, financials] = await Promise.all([
+      fetchJSON<{ v?: number[]; s?: string }>(
+        `${FINNHUB_BASE_URL}/stock/candle?symbol=${cleanSymbol}&resolution=D&from=${from}&to=${to}&token=${token}`
+      ),
+      fetchJSON(
+        `${FINNHUB_BASE_URL}/stock/metric?symbol=${cleanSymbol}&metric=all&token=${token}`,
+        1800
+      ),
+    ]);
+
+    const financialsData = financials as FinancialsData;
+    const averageVolume = financialsData?.metric?.['10DayAverageTradingVolume'];
+    const volumes = candles?.s === 'ok' ? candles.v : undefined;
+    const currentVolume = volumes && volumes.length > 0 ? volumes[volumes.length - 1] / 1_000_000 : undefined;
+
+    if (currentVolume == null || averageVolume == null) return null;
+
+    return { symbol: cleanSymbol, currentVolume, averageVolume };
+  } catch (error) {
+    console.error(`Error fetching volume data for ${cleanSymbol}:`, error);
+    return null;
+  }
+});
+
 export const getStocksDetails = cache(async (symbol: string) => {
   const cleanSymbol = symbol.trim().toUpperCase();
   const token = process.env.FINNHUB_API_KEY ?? NEXT_PUBLIC_FINNHUB_API_KEY;

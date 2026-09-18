@@ -1,10 +1,13 @@
 import {inngest} from "@/lib/inngest/client";
 import { NEWS_SUMMARY_EMAIL_PROMPT, PERSONALIZED_WELCOME_EMAIL_PROMPT } from "./prompt";
-import { sendNewsSummaryEmail, sendWelcomeEmail } from "../nodemailer";
+import { sendNewsSummaryEmail, sendStockAlertEmail, sendVolumeAlertEmail, sendWelcomeEmail } from "../nodemailer";
 import { getAllUsersForNewsEmail } from "../actions/user.actions";
 import { getWatchlistSymbolsByEmail } from "../actions/watchlist.actions";
-import { getNews } from "../actions/finnhub.actions";
-import { getFormattedTodayDate } from "@/lib/utils";
+import { getActiveAlertsForCron } from "../actions/alert.actions";
+import { getNews, getStocksDetails, getStockVolumeData } from "../actions/finnhub.actions";
+import { getFormattedTodayDate, getFrequencyWindowMs, formatPrice } from "@/lib/utils";
+import { connectToDatabase } from "@/database/mongoose";
+import { Alert } from "@/database/models/alert.model";
 
 type NewsUser = {
     id: string;
@@ -182,4 +185,150 @@ export const sendDailyNewsSummary = inngest.createFunction(
 
         return { success: true , message: 'Daily news summary emails sent successfully'};
     },
+)
+
+type PriceSnapshot = {
+    currentPrice: number;
+    changePercent: number;
+    company: string;
+};
+
+type VolumeSnapshot = {
+    currentVolume: number;
+    averageVolume: number;
+};
+
+export const checkPriceAlerts = inngest.createFunction(
+    {
+        id: 'check-price-alerts',
+        triggers: [
+            { event: 'app/check.price.alerts' },
+            { cron: '* * * * *' },
+        ],
+    },
+    async ({ step }) => {
+        const alerts = await step.run('get-active-alerts', getActiveAlertsForCron);
+        if (!alerts || alerts.length === 0) {
+            return { success: false, message: 'No active alerts to check' };
+        }
+
+        const { priceData, volumeData } = await step.run('fetch-market-data', async () => {
+            const symbols = Array.from(new Set(alerts.map((a) => a.symbol)));
+            const volumeSymbols = Array.from(
+                new Set(alerts.filter((a) => a.alertType === 'volume').map((a) => a.symbol))
+            );
+
+            const priceEntries = await Promise.all(
+                symbols.map(async (symbol) => {
+                    try {
+                        const data = await getStocksDetails(symbol);
+                        return [symbol, data] as const;
+                    } catch (e) {
+                        console.error(`Failed to fetch price for ${symbol}:`, e);
+                        return [symbol, null] as const;
+                    }
+                })
+            );
+
+            const volumeEntries = await Promise.all(
+                volumeSymbols.map(async (symbol) => {
+                    const data = await getStockVolumeData(symbol);
+                    return [symbol, data] as const;
+                })
+            );
+
+            return {
+                priceData: Object.fromEntries(priceEntries) as Record<string, PriceSnapshot | null>,
+                volumeData: Object.fromEntries(volumeEntries) as Record<string, VolumeSnapshot | null>,
+            };
+        });
+
+        const now = Date.now();
+        const toNotify: Array<{ alert: (typeof alerts)[number]; email: StockAlertEmailData | VolumeAlertEmailData; kind: 'price' | 'volume' }> = [];
+
+        for (const alert of alerts) {
+            const throttleOk =
+                !alert.lastTriggeredAt ||
+                now - new Date(alert.lastTriggeredAt).getTime() >= getFrequencyWindowMs(alert.frequency);
+            if (!throttleOk) continue;
+
+            const price = priceData[alert.symbol];
+            if (!price) continue;
+
+            const timestamp = new Date().toLocaleString('en-US', { dateStyle: 'medium', timeStyle: 'short' });
+
+            if (alert.alertType === 'upper' || alert.alertType === 'lower') {
+                const conditionMet =
+                    alert.alertType === 'upper'
+                        ? price.currentPrice > alert.threshold
+                        : price.currentPrice < alert.threshold;
+                if (!conditionMet) continue;
+
+                toNotify.push({
+                    alert,
+                    kind: 'price',
+                    email: {
+                        email: alert.email,
+                        symbol: alert.symbol,
+                        company: alert.company,
+                        currentPrice: formatPrice(price.currentPrice),
+                        targetPrice: formatPrice(alert.threshold),
+                        timestamp,
+                        alertType: alert.alertType,
+                    },
+                });
+            } else {
+                const volume = volumeData[alert.symbol];
+                if (!volume) continue;
+
+                const spikePercent = ((volume.currentVolume - volume.averageVolume) / volume.averageVolume) * 100;
+                const conditionMet = spikePercent >= alert.threshold;
+                if (!conditionMet) continue;
+
+                const changeDirection = price.changePercent >= 0 ? '+' : '-';
+
+                toNotify.push({
+                    alert,
+                    kind: 'volume',
+                    email: {
+                        email: alert.email,
+                        symbol: alert.symbol,
+                        company: alert.company,
+                        currentVolume: volume.currentVolume.toFixed(2),
+                        currentPrice: formatPrice(price.currentPrice),
+                        changeDirection,
+                        changePercent: Math.abs(price.changePercent).toFixed(2),
+                        priceColor: price.changePercent >= 0 ? '#10b981' : '#ef4444',
+                        alertMessage: `Volume spiked to ${volume.currentVolume.toFixed(2)}M shares, ${spikePercent.toFixed(0)}% above the 10-day average.`,
+                        averageVolume: volume.averageVolume.toFixed(2),
+                        volumeSpike: `${spikePercent.toFixed(0)}%`,
+                        timestamp,
+                    },
+                });
+            }
+        }
+
+        if (toNotify.length === 0) {
+            return { success: true, message: 'Checked alerts, no thresholds crossed' };
+        }
+
+        const sent = await step.run('send-and-record', async () => {
+            await connectToDatabase();
+
+            await Promise.all(
+                toNotify.map(async ({ alert, email, kind }) => {
+                    if (kind === 'price') {
+                        await sendStockAlertEmail(email as StockAlertEmailData);
+                    } else {
+                        await sendVolumeAlertEmail(email as VolumeAlertEmailData);
+                    }
+                    await Alert.findByIdAndUpdate(alert.id, { lastTriggeredAt: new Date() });
+                })
+            );
+
+            return toNotify.length;
+        });
+
+        return { success: true, message: `Checked ${alerts.length} alerts, sent ${sent} emails` };
+    }
 )

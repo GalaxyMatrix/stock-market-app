@@ -29,11 +29,18 @@ export const PREFERRED_INDUSTRIES = [
 export const ALERT_TYPE_OPTIONS = [
     { value: 'upper', label: 'Upper' },
     { value: 'lower', label: 'Lower' },
+    { value: 'volume', label: 'Volume Spike' },
 ];
 
 export const CONDITION_OPTIONS = [
     { value: 'greater', label: 'Greater than (>)' },
     { value: 'less', label: 'Less than (<)' },
+];
+
+export const ALERT_FREQUENCY_OPTIONS = [
+    { value: 'once_per_minute', label: 'Once per minute' },
+    { value: 'once_per_hour', label: 'Once per hour' },
+    { value: 'once_per_day', label: 'Once per day' },
 ];
 
 // TradingView Charts

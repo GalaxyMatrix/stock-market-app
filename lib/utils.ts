@@ -126,8 +126,24 @@ export const formatDateToday = new Date().toLocaleDateString('en-US', {
 
 
 export const getAlertText = (alert: Alert) => {
+  if (alert.alertType === 'volume') {
+    return `Volume > ${alert.threshold}% avg`;
+  }
   const condition = alert.alertType === 'upper' ? '>' : '<';
   return `Price ${condition} ${formatPrice(alert.threshold)}`;
+};
+
+export const getFrequencyWindowMs = (
+  frequency: 'once_per_minute' | 'once_per_hour' | 'once_per_day'
+) => {
+  switch (frequency) {
+    case 'once_per_minute':
+      return 60_000;
+    case 'once_per_hour':
+      return 3_600_000;
+    case 'once_per_day':
+      return 86_400_000;
+  }
 };
 
 export const getFormattedTodayDate = () => new Date().toLocaleDateString('en-US', {

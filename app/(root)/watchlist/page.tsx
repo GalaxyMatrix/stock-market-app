@@ -2,11 +2,13 @@ import { Star } from "lucide-react";
 import { getNews, searchStocks } from "@/lib/actions/finnhub.actions";
 import SearchCommand from "@/components/SearchCommand";
 import { getWatchlistWithData } from "@/lib/actions/watchlist.actions";
+import { getUserAlerts } from "@/lib/actions/alert.actions";
 import { WatchlistTable } from "@/components/WatchlistTable";
 import WatchlistNews from "@/components/WatchlistNews";
+import AlertsList from "@/components/AlertsList";
 
 const Watchlist = async () => {
-  const watchlist = await getWatchlistWithData();
+  const watchlist: StockWithData[] = await getWatchlistWithData();
   const initialStocks = await searchStocks();
 
   if (watchlist.length === 0) {
@@ -33,19 +35,27 @@ const Watchlist = async () => {
     console.error("Failed to load watchlist news:", e);
   }
 
+  const alerts = await getUserAlerts();
+
   return (
-    <section className="watchlist">
-      <div className="flex flex-col gap-8">
-        <div className="flex flex-col gap-6">
-          <div className="flex items-center justify-between">
-            <h2 className="watchlist-title">Watchlist</h2>
-            <SearchCommand initialStocks={initialStocks} />
+    <div className="flex flex-col gap-8">
+      <div className="watchlist-container">
+        <section className="watchlist">
+          <div className="flex flex-col gap-6">
+            <div className="flex items-center justify-between">
+              <h2 className="watchlist-title">Watchlist</h2>
+              <SearchCommand initialStocks={initialStocks} />
+            </div>
+            <WatchlistTable watchlist={watchlist} />
           </div>
-          <WatchlistTable watchlist={watchlist} />
-        </div>
-        <WatchlistNews news={news} />
+        </section>
+        <AlertsList
+          alertData={alerts}
+          watchlist={watchlist.map((s) => ({ symbol: s.symbol, company: s.company }))}
+        />
       </div>
-    </section>
+      <WatchlistNews news={news} />
+    </div>
   );
 };
 

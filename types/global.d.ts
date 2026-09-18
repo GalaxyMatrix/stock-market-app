@@ -187,16 +187,18 @@ declare global {
         symbol: string;
         company: string;
         alertName: string;
-        alertType: 'upper' | 'lower';
+        alertType: 'upper' | 'lower' | 'volume';
         threshold: string;
+        frequency: 'once_per_minute' | 'once_per_hour' | 'once_per_day';
     };
 
     type AlertModalProps = {
         alertId?: string;
         alertData?: AlertData;
-        action?: string;
+        action?: 'create' | 'update';
         open: boolean;
         setOpen: (open: boolean) => void;
+        watchlistOptions?: { symbol: string; company: string }[];
     };
 
     type RawNewsArticle = {
@@ -217,9 +219,35 @@ declare global {
         company: string;
         alertName: string;
         currentPrice: number;
-        alertType: 'upper' | 'lower';
+        alertType: 'upper' | 'lower' | 'volume';
         threshold: number;
+        frequency: 'once_per_minute' | 'once_per_hour' | 'once_per_day';
         changePercent?: number;
+    };
+
+    type StockAlertEmailData = {
+        email: string;
+        symbol: string;
+        company: string;
+        currentPrice: string;
+        targetPrice: string;
+        timestamp: string;
+        alertType: 'upper' | 'lower';
+    };
+
+    type VolumeAlertEmailData = {
+        email: string;
+        symbol: string;
+        company: string;
+        currentVolume: string;
+        currentPrice: string;
+        changeDirection: string;
+        changePercent: string;
+        priceColor: string;
+        alertMessage: string;
+        averageVolume: string;
+        volumeSpike: string;
+        timestamp: string;
     };
 }
 

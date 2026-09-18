@@ -1,5 +1,6 @@
 "use client";
 
+import { useState } from "react";
 import {
   Table,
   TableBody,
@@ -11,13 +12,18 @@ import {
 import { WATCHLIST_TABLE_HEADER } from "@/lib/constants";
 import { Button } from "@/components/ui/button";
 import WatchlistButton from "@/components/WatchlistButton";
+import AlertModal from "@/components/AlertModal";
 import { useRouter } from "next/navigation";
 import { cn, getChangeColorClass } from "@/lib/utils";
 
 export function WatchlistTable({ watchlist }: WatchlistTableProps) {
   const router = useRouter();
+  const [alertModalStock, setAlertModalStock] = useState<{ symbol: string; company: string } | null>(
+    null
+  );
 
   return (
+    <>
     <Table className="scrollbar-hide-default watchlist-table">
       <TableHeader>
         <TableRow className="table-header-row">
@@ -49,8 +55,13 @@ export function WatchlistTable({ watchlist }: WatchlistTableProps) {
             </TableCell>
             <TableCell className="table-cell">{item.marketCap || "—"}</TableCell>
             <TableCell className="table-cell">{item.peRatio || "—"}</TableCell>
-            <TableCell>
-              <Button className="add-alert">Add Alert</Button>
+            <TableCell onClick={(e) => e.stopPropagation()}>
+              <Button
+                className="add-alert"
+                onClick={() => setAlertModalStock({ symbol: item.symbol, company: item.company })}
+              >
+                Add Alert
+              </Button>
             </TableCell>
             <TableCell onClick={(e) => e.stopPropagation()}>
               <WatchlistButton
@@ -66,5 +77,25 @@ export function WatchlistTable({ watchlist }: WatchlistTableProps) {
         ))}
       </TableBody>
     </Table>
+    <AlertModal
+      open={alertModalStock !== null}
+      setOpen={(open) => {
+        if (!open) setAlertModalStock(null);
+      }}
+      action="create"
+      alertData={
+        alertModalStock
+          ? {
+              symbol: alertModalStock.symbol,
+              company: alertModalStock.company,
+              alertName: "",
+              alertType: "upper",
+              threshold: "",
+              frequency: "once_per_day",
+            }
+          : undefined
+      }
+    />
+    </>
   );
 }
