@@ -249,6 +249,39 @@ declare global {
         volumeSpike: string;
         timestamp: string;
     };
+
+    type CandleSeries = {
+        c?: number[];
+        h?: number[];
+        t?: number[];
+        s?: string;
+    };
+
+    type RiskLabel = 'Low' | 'Medium' | 'High';
+
+    type StockRiskAnalytics = {
+        symbol: string;
+        company: string;
+        currentPrice: number;
+        priceFormatted: string;
+        changePercent: number;
+        changeFormatted: string;
+        sampleDays: number;
+        annualizedVolatility: number | null;
+        computedBeta: number | null;
+        finnhubBeta: number | null;
+        maxDrawdown: number | null;
+        var95: number | null;
+        cvar95: number | null;
+        sharpe: number | null;
+        sortino: number | null;
+        distanceFrom52wHigh: number | null;
+        week52High: number | null;
+        riskScore: number | null;
+        riskLabel: RiskLabel | null;
+        summary: string;
+        limited: boolean;
+    };
 }
 
 export {};

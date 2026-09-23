@@ -376,6 +376,15 @@
   .alert-delete-btn {
     @apply text-gray-400 rounded-full hover:bg-red-600/15 bg-transparent cursor-pointer transition-colors;
   }
+  .risk-card {
+    @apply bg-gray-800 rounded-lg border border-gray-600 p-5;
+  }
+  .risk-gauge {
+    @apply w-36 h-36 rounded-full flex items-center justify-center;
+  }
+  .risk-gauge-inner {
+    @apply w-[7.25rem] h-[7.25rem] rounded-full bg-gray-800 flex flex-col items-center justify-center;
+  }
 }
 
 /* Market News Component Styles */

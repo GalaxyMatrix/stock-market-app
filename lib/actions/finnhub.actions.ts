@@ -7,6 +7,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/better-auth/auth";
 import { getWatchlistSymbolsByEmail } from "@/lib/actions/watchlist.actions"
+import { alignClosesByTimestamp, buildRiskSummary, computeRiskMetrics } from '@/lib/analytics/risk';
 
 const FINNHUB_BASE_URL = 'https://finnhub.io/api/v1';
 const NEXT_PUBLIC_FINNHUB_API_KEY = process.env.NEXT_PUBLIC_FINNHUB_API_KEY ?? '';
@@ -25,6 +26,37 @@ async function fetchJSON<T>(url: string, revalidateSeconds?: number): Promise<T>
 }
 
 export { fetchJSON };
+
+async function fetchYahooDailyCloses(symbol: string): Promise<CandleSeries> {
+  try {
+    const url = `https://query1.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?interval=1d&range=1y`;
+    const res = await fetch(url, {
+      headers: { 'User-Agent': 'Mozilla/5.0' },
+      next: { revalidate: 1800 },
+    });
+    if (!res.ok) return { s: 'no_data' };
+
+    const json = await res.json();
+    const result = json?.chart?.result?.[0];
+    const timestamps: number[] | undefined = result?.timestamp;
+    const closes: Array<number | null> | undefined = result?.indicators?.quote?.[0]?.close;
+    if (!timestamps || !closes) return { s: 'no_data' };
+
+    const t: number[] = [];
+    const c: number[] = [];
+    for (let i = 0; i < timestamps.length; i++) {
+      if (closes[i] != null) {
+        t.push(timestamps[i]);
+        c.push(closes[i] as number);
+      }
+    }
+
+    return t.length ? { s: 'ok', t, c } : { s: 'no_data' };
+  } catch (error) {
+    console.error(`Error fetching Yahoo daily closes for ${symbol}:`, error);
+    return { s: 'no_data' };
+  }
+}
 
 export async function getNews(symbols?: string[]): Promise<MarketNewsArticle[]> {
   try {
@@ -277,6 +309,107 @@ export const getStocksDetails = cache(async (symbol: string) => {
   } catch (error) {
     console.error(`Error fetching details for ${cleanSymbol}:`, error);
     throw new Error('Failed to fetch stock details');
+  }
+});
+
+export const getStockRiskAnalytics = cache(async (symbol: string): Promise<StockRiskAnalytics | null> => {
+  const cleanSymbol = symbol.trim().toUpperCase();
+  const token = process.env.FINNHUB_API_KEY ?? NEXT_PUBLIC_FINNHUB_API_KEY;
+
+  if (!token) {
+    throw new Error('FINNHUB API key is not configured');
+  }
+
+  const to = Math.floor(Date.now() / 1000);
+  const from = to - 60 * 60 * 24 * 400;
+
+  try {
+    const fetchCandles = async (ticker: string): Promise<CandleSeries> => {
+      try {
+        const candles = await fetchJSON<CandleSeries>(
+          `${FINNHUB_BASE_URL}/stock/candle?symbol=${ticker}&resolution=D&from=${from}&to=${to}&token=${token}`,
+          1800
+        );
+        if (candles?.s === 'ok' && candles.c?.length) return candles;
+      } catch (error) {
+        console.error(`Error fetching Finnhub candles for ${ticker}:`, error);
+      }
+      return fetchYahooDailyCloses(ticker);
+    };
+
+    const [quote, profile, financials, stockCandles, spyCandles] = await Promise.all([
+      fetchJSON(`${FINNHUB_BASE_URL}/quote?symbol=${cleanSymbol}&token=${token}`),
+      fetchJSON(
+        `${FINNHUB_BASE_URL}/stock/profile2?symbol=${cleanSymbol}&token=${token}`,
+        3600
+      ),
+      fetchJSON(
+        `${FINNHUB_BASE_URL}/stock/metric?symbol=${cleanSymbol}&metric=all&token=${token}`,
+        1800
+      ),
+      fetchCandles(cleanSymbol),
+      fetchCandles('SPY'),
+    ]);
+
+    const quoteData = quote as QuoteData;
+    const profileData = profile as ProfileData;
+    const financialsData = financials as FinancialsData;
+
+    if (!quoteData?.c || !profileData?.name) return null;
+
+    const closes = stockCandles?.s === 'ok' ? stockCandles.c ?? [] : [];
+    const stockTs = stockCandles?.s === 'ok' ? stockCandles.t ?? [] : [];
+    const spyCloses = spyCandles?.s === 'ok' ? spyCandles.c ?? [] : [];
+    const spyTs = spyCandles?.s === 'ok' ? spyCandles.t ?? [] : [];
+
+    let alignedStock = closes;
+    let alignedMarket: number[] | undefined;
+
+    if (closes.length && spyCloses.length) {
+      const aligned = alignClosesByTimestamp(
+        { t: stockTs, c: closes },
+        { t: spyTs, c: spyCloses }
+      );
+      alignedStock = aligned.stockCloses;
+      alignedMarket = aligned.marketCloses;
+    }
+
+    const week52High =
+      financialsData?.metric?.['52WeekHigh'] ??
+      (closes.length ? Math.max(...closes) : undefined);
+
+    const metrics = computeRiskMetrics({
+      closes: alignedStock.length ? alignedStock : closes,
+      marketCloses: alignedMarket,
+      currentPrice: quoteData.c,
+      week52High,
+    });
+
+    const finnhubBeta = financialsData?.metric?.beta ?? null;
+    const changePercent = quoteData.dp || 0;
+
+    return {
+      symbol: cleanSymbol,
+      company: profileData.name,
+      currentPrice: quoteData.c,
+      priceFormatted: formatPrice(quoteData.c),
+      changePercent,
+      changeFormatted: formatChangePercent(changePercent),
+      finnhubBeta,
+      week52High: week52High ?? null,
+      ...metrics,
+      summary: buildRiskSummary({
+        symbol: cleanSymbol,
+        label: metrics.riskLabel,
+        vol: metrics.annualizedVolatility,
+        beta: metrics.computedBeta ?? finnhubBeta,
+        maxDd: metrics.maxDrawdown,
+        limited: metrics.limited,
+      }),
+    };
+  } catch (error) {
+    console.error(`Error fetching risk analytics for ${cleanSymbol}:`, error);
+    return null;
   }
 });
 

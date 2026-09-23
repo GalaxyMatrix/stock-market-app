@@ -6,6 +6,7 @@ import { getUserAlerts } from "@/lib/actions/alert.actions";
 import { WatchlistTable } from "@/components/WatchlistTable";
 import WatchlistNews from "@/components/WatchlistNews";
 import AlertsList from "@/components/AlertsList";
+import WatchlistChat from "@/components/WatchlistChat";
 
 const Watchlist = async () => {
   const watchlist: StockWithData[] = await getWatchlistWithData();
@@ -47,6 +48,7 @@ const Watchlist = async () => {
               <SearchCommand initialStocks={initialStocks} />
             </div>
             <WatchlistTable watchlist={watchlist} />
+            <WatchlistChat symbols={symbols} />
           </div>
         </section>
         <AlertsList

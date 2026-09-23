@@ -3,6 +3,7 @@ import TradingViewWidget from "@/components/TradingViewWidget";
 import { WatchlistItem } from "@/database/models/watchlist.model";
 import { getStocksDetails } from "@/lib/actions/finnhub.actions";
 import { getUserWatchlist } from "@/lib/actions/watchlist.actions";
+import Link from "next/link";
 import {
   SYMBOL_INFO_WIDGET_CONFIG,
   CANDLE_CHART_WIDGET_CONFIG,
@@ -63,6 +64,12 @@ const StockDetails = async ({ params }: StockDetailsPageProps) => {
             company={stockData.company}
             isInWatchlist={isInWatchlist}
           />
+          <Link
+            href={`/analytics/${upperSymbol}`}
+            className="watchlist-btn mt-3 flex items-center justify-center"
+          >
+            View risk analytics
+          </Link>
           <TradingViewWidget
             title=""
             scriptUrl={`${WIDGET_BASE}technical-analysis.js`}
