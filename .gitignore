@@ -33,9 +33,15 @@ yarn-error.log*
 # env files (can opt-in for committing if needed)
 .env*
 
+# agent traces (may contain user prompts)
+/agent/logs/
+
 # vercel
 .vercel
 
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+__pycache__/
+*.py[cod]

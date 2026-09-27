@@ -29,6 +29,8 @@ from ag_ui.encoder import EventEncoder  # Encoder for converting events to strea
 
 # Import our custom stock analysis workflow
 from stock_analysis import StockAnalysisFlow
+from safety.input_guard import check_messages
+from observability.log import log_event
 
 # CopilotKit state management
 from copilotkit import CopilotKitState
@@ -114,13 +116,14 @@ async def crewai_agent(input_data: RunAgentInput):
             
 
             message_id = str(uuid.uuid4())
-
+            run_id = input_data.run_id or str(uuid.uuid4())
+            log_event(run_id, "run_start", thread_id=input_data.thread_id)
 
             yield encoder.encode(
                 RunStartedEvent(
                     type=EventType.RUN_STARTED,
                     thread_id = input_data.thread_id,
-                    run_id = input_data.run_id
+                    run_id = run_id
                 )
             )
 
@@ -148,13 +151,45 @@ async def crewai_agent(input_data: RunAgentInput):
                 tool_logs = []
             )
 
-
+            guard = check_messages(input_data.messages)
+            if not guard.allowed:
+                log_event(run_id, "safety_input_block", reason=guard.reason)
+                log_event(run_id, "run_end", ok=False, reason=guard.reason)
+                yield encoder.encode(
+                    TextMessageStartEvent(
+                        type=EventType.TEXT_MESSAGE_START,
+                        message_id=message_id,
+                        role="assistant",
+                    )
+                )
+                yield encoder.encode(
+                    TextMessageContentEvent(
+                        type=EventType.TEXT_MESSAGE_CONTENT,
+                        message_id=message_id,
+                        delta=guard.refusal,
+                    )
+                )
+                yield encoder.encode(
+                    TextMessageEndEvent(
+                        type=EventType.TEXT_MESSAGE_END,
+                        message_id=message_id,
+                    )
+                )
+                yield encoder.encode(
+                    RunFinishedEvent(
+                        type=EventType.RUN_FINISHED,
+                        thread_id=input_data.thread_id,
+                        run_id=run_id,
+                    )
+                )
+                return
 
             agent_task = asyncio.create_task(
                 StockAnalysisFlow().kickoff_async(inputs={
                     "state" : state,
                     "emit_event" : emit_event,
-                    "investment_portfolio" : input_data.state["investment_portfolio"]
+                    "investment_portfolio" : input_data.state["investment_portfolio"],
+                    "run_id": run_id,
                 })
             )
 
@@ -224,100 +259,88 @@ async def crewai_agent(input_data: RunAgentInput):
             )
             )
             
-            # Step 8: Handle workflow results based on the final message type
-            # Check if the last message is from the assistant (AI agent)
-            if state["messages"][-1].role == "assistant":
-                
-                # Step 8.1: Handle tool call results (charts, data visualizations)
-                if state["messages"][-1].tool_calls:
-                    # The workflow generated a tool call (e.g., render charts)
-                    # Stream tool call events to trigger UI rendering
-                    
-                    yield encoder.encode(
-                        ToolCallStartEvent(
-                            type=EventType.TOOL_CALL_START,
-                            tool_call_id=state["messages"][-1].tool_calls[0].id,
-                            toolCallName=state["messages"][-1]
-                            .tool_calls[0]
-                            .function.name,
-                        )
+            last_assistant = None
+            for message in reversed(state["messages"]):
+                if getattr(message, "role", None) == "assistant":
+                    last_assistant = message
+                    break
+
+            chart_call = None
+            if last_assistant and getattr(last_assistant, "tool_calls", None):
+                candidate = last_assistant.tool_calls[0]
+                if candidate.function.name == "render_standard_charts_and_table":
+                    chart_call = candidate
+
+            if chart_call:
+                yield encoder.encode(
+                    ToolCallStartEvent(
+                        type=EventType.TOOL_CALL_START,
+                        tool_call_id=chart_call.id,
+                        toolCallName=chart_call.function.name,
+                    )
+                )
+                yield encoder.encode(
+                    ToolCallArgsEvent(
+                        type=EventType.TOOL_CALL_ARGS,
+                        tool_call_id=chart_call.id,
+                        delta=chart_call.function.arguments,
+                    )
+                )
+                yield encoder.encode(
+                    ToolCallEndEvent(
+                        type=EventType.TOOL_CALL_END,
+                        tool_call_id=chart_call.id,
+                    )
+                )
+            else:
+                content = ""
+                if last_assistant:
+                    content = (
+                        getattr(last_assistant, "content", None)
+                        or getattr(last_assistant, "refusal", None)
+                        or ""
+                    )
+                if not content:
+                    content = (
+                        "Analysis finished, but I have no chart or summary to show. "
+                        'Try: Analyze my watchlist with $10k each since last year.'
                     )
 
-                    # Stream the tool call arguments (contains analysis results)
-                    yield encoder.encode(
-                        ToolCallArgsEvent(
-                            type=EventType.TOOL_CALL_ARGS,
-                            tool_call_id=state["messages"][-1].tool_calls[0].id,
-                            delta=state["messages"][-1]
-                            .tool_calls[0]
-                            .function.arguments,  # Contains investment summary and insights
-                        )
+                yield encoder.encode(
+                    TextMessageStartEvent(
+                        type=EventType.TEXT_MESSAGE_START,
+                        message_id=message_id,
+                        role="assistant",
                     )
-
-                    # Signal end of tool call
+                )
+                n_parts = 100
+                part_length = max(1, len(content) // n_parts)
+                parts = [content[i:i + part_length] for i in range(0, len(content), part_length)]
+                if len(parts) > n_parts:
+                    parts = parts[:n_parts - 1] + ["".join(parts[n_parts - 1:])]
+                for part in parts:
                     yield encoder.encode(
-                        ToolCallEndEvent(
-                            type=EventType.TOOL_CALL_END,
-                            tool_call_id=state["messages"][-1].tool_calls[0].id,
-                        )
-                    )
-                else:
-                    # Step 8.2: Handle text message results (when no analysis was performed)
-                    yield encoder.encode(
-                        TextMessageStartEvent(
-                            type=EventType.TEXT_MESSAGE_START,
+                        TextMessageContentEvent(
+                            type=EventType.TEXT_MESSAGE_CONTENT,
                             message_id=message_id,
-                            role="assistant",
+                            delta=part,
                         )
                     )
-
-                    # Step 8.2.1: Stream text content if available
-                    if state["messages"][-1].content:
-                        content = state["messages"][-1].content
-                        
-                        # Split content into chunks for smooth streaming effect
-                        n_parts = 100  # Number of chunks for streaming
-                        part_length = max(1, len(content) // n_parts)
-                        parts = [content[i:i+part_length] for i in range(0, len(content), part_length)]
-                        
-                        # Ensure we don't exceed the target number of parts
-                        if len(parts) > n_parts:
-                            parts = parts[:n_parts-1] + [''.join(parts[n_parts-1:])]
-                            
-                        # Stream each part with a small delay for smooth typing effect
-                        for part in parts:
-                            yield encoder.encode(
-                                TextMessageContentEvent(
-                                    type=EventType.TEXT_MESSAGE_CONTENT,
-                                    message_id=message_id,
-                                    delta=part,  # Chunk of text content
-                                )
-                            )
-                            await asyncio.sleep(0.05)  # Small delay for typing effect
-                    else:
-                        # Step 8.2.2: Handle case where no content is available (error scenario)
-                        yield encoder.encode(
-                            TextMessageContentEvent(
-                                type=EventType.TEXT_MESSAGE_CONTENT,
-                                message_id=message_id,
-                                delta="Something went wrong! Please try again.",
-                            )
-                        )
-                    
-                    # Step 8.2.3: Signal end of text message
-                    yield encoder.encode(
-                        TextMessageEndEvent(
-                            type=EventType.TEXT_MESSAGE_END,
-                            message_id=message_id,
-                        )
+                    await asyncio.sleep(0.05)
+                yield encoder.encode(
+                    TextMessageEndEvent(
+                        type=EventType.TEXT_MESSAGE_END,
+                        message_id=message_id,
                     )
+                )
 
             # Step 9: Emit run finished event to signal completion
+            log_event(run_id, "run_end", ok=True)
             yield encoder.encode(
                 RunFinishedEvent(
                     type=EventType.RUN_FINISHED,
                     thread_id=input_data.thread_id,  # Same thread ID from start
-                    run_id=input_data.run_id,        # Same run ID from start
+                    run_id=run_id,
                 )
             )
 

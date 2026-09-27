@@ -1,22 +1,22 @@
 # CrewAI Flow framework for building multi-step AI workflows
-from crewai.flow.flow import Flow, start, router, listen, or_
+from crewai.flow.flow import Flow, start, router, listen
 from litellm import completion
 from pydantic import BaseModel
 from typing import Literal, List
 
 # AG UI types for message handling and state management
-from ag_ui.core.types import AssistantMessage, ToolMessage
+from ag_ui.core.types import AssistantMessage, SystemMessage, ToolMessage
 from ag_ui.core.events import StateDeltaEvent, EventType
 
 # Standard Python libraries
 import uuid  
 import asyncio  
 import json  
-import os  
-from datetime import datetime  
+import math
+import re
+from datetime import date, datetime
 
 # External libraries
-from openai import OpenAI  
 from dotenv import load_dotenv  
 import yfinance as yf  
 import numpy as np  
@@ -24,6 +24,11 @@ import pandas as pd
 
 # Import custom prompts for the AI models
 from prompts import system_prompt, insights_prompt
+from observability.openai_traced import traced_chat_completion
+from observability.log import log_event
+from safety.input_guard import _last_user_text
+from safety.output_guard import sanitize_insights
+from safety.tool_guard import _normalize_date, _normalize_ticker, sanitize_extract_args
 
 # Load environment variables (like API keys) from .env file
 load_dotenv()
@@ -150,11 +155,26 @@ generate_insights = {
 
 class StockAnalysisFlow(Flow):
 
+    def _system_prompt_text(self):
+        return (
+            system_prompt.replace(
+                "{PORTFOLIO_DATA_PLACEHOLDER}",
+                json.dumps(self.state.get("investment_portfolio") or []),
+            )
+            + f"\n\nTODAY'S DATE: {datetime.today().strftime('%Y-%m-%d')}"
+        )
+
     @start()
     def start(self):
-        self.state['state']["messages"][0].content = system_prompt.replace(
-            "{PORTFOLIO_DATA_PLACEHOLDER}", json.dumps(self.state["investment_portfolio"])
-        )
+        system = self._system_prompt_text()
+        messages = self.state['state']["messages"]
+        if messages and getattr(messages[0], "role", None) == "system":
+            messages[0].content = system
+        else:
+            messages.insert(
+                0,
+                SystemMessage(id=str(uuid.uuid4()), role="system", content=system),
+            )
         return self.state
     
 
@@ -162,7 +182,7 @@ class StockAnalysisFlow(Flow):
     async def chat(self):
         try:
           tool_log_id = str(uuid.uuid4())
-          self.state["state"]["tool_log_id"].append(
+          self.state["state"]["tool_logs"].append(
             {
               "id": tool_log_id,
               "message": "Analyzing user query", 
@@ -176,7 +196,7 @@ class StockAnalysisFlow(Flow):
               delta=[
                 {
                   "op" : "add",
-                  "path" : "/tools_log/-", 
+                  "path" : "/tool_logs/-", 
                   "value" : {
                     "message": "Analyzing user query", 
                     "status" : "processing",
@@ -189,11 +209,23 @@ class StockAnalysisFlow(Flow):
 
           await asyncio.sleep(0)
 
-          model = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-          response = model.chat.completions.create(
-            model = "gpt-4o-mini",
-            messages = self.state['state']['messages'],
-            tools = [extract_relevant_data_from_user_prompt]
+          user_text = _last_user_text(self.state['state']['messages'])
+          response = traced_chat_completion(
+            self.state.get("run_id", "unknown"),
+            "extract",
+            model="gpt-4o-mini",
+            messages=[
+              {"role": "system", "content": self._system_prompt_text()},
+              {
+                "role": "user",
+                "content": user_text or "Analyze my watchlist.",
+              },
+            ],
+            tools=[extract_relevant_data_from_user_prompt],
+            tool_choice={
+              "type": "function",
+              "function": {"name": "extract_relevant_data_from_user_prompt"},
+            },
           )
 
           index = len(self.state['state']['tool_logs']) - 1
@@ -203,7 +235,7 @@ class StockAnalysisFlow(Flow):
               delta = [
                 {
                   "op" : "replace",
-                  "path" : f"/tools_log/{index}/status",
+                  "path" : f"/tool_logs/{index}/status",
                   "value" : "completed",
                 }
               ]
@@ -212,46 +244,107 @@ class StockAnalysisFlow(Flow):
 
           await asyncio.sleep(0)
 
-          if(response.choices[0].finish_reason == "tool_calls"):
+          choice = response.choices[0]
+          message = choice.message
+          content = message.content or ""
+          refusal = getattr(message, "refusal", None) or ""
+          log_event(
+            self.state.get("run_id", "unknown"),
+            "extract_result",
+            finish_reason=choice.finish_reason,
+            content=content[:300],
+            refusal=refusal[:300],
+          )
+          print(
+            f"extract finish_reason={choice.finish_reason} "
+            f"content={content[:200]!r} refusal={refusal[:200]!r}"
+          )
 
+          if choice.finish_reason == "tool_calls" and message.tool_calls:
             tool_calls = [
-              converted_tool_call(tc)
-              for tc in response.choices[0].message.tool_calls
+              convert_tool_call(tc)
+              for tc in message.tool_calls
             ]
-
-            a_message = AssistantMessage(
-              role="assistant", tool_calls=tool_calls, id=response.id
-            )
-            self.state['state']["messages"].append(a_message)
-
-
-            for tc in tool_calls:
-              tool_message = ToolMessage(
-                id=str(uuid.uuid4()),
-                role="tool",
-                tool_call_id=tc["id"],
-                content = "Investment parameters extracted successfully"
-              )
-              self.state['state']["messages"].append(tool_message)
+            self._append_extract_messages(tool_calls, response.id)
             return "simulation"
-          else:
-            a_message = AssistantMessage(
-              id=response.id,
-              content = response.choices[0].message.content,
-              role = "assistant",
-            )
-            self.state['state']["messages"].append(a_message)
-            return "end"  # Skip to end since no investment data to process
+
+          if self._continue_with_watchlist_extract(user_text):
+            return "simulation"
+
+          a_message = AssistantMessage(
+            id=response.id,
+            content=content or refusal,
+            role="assistant",
+          )
+          self.state['state']["messages"].append(a_message)
+          return "end"
 
             
         except Exception as e:
-            # Step 2.6: Handle any errors during processing
             print(f"Error in chat method: {e}")
-            # Create a message with a generated ID if response is not available
+            user_text = _last_user_text(self.state['state']['messages'])
+            if self._continue_with_watchlist_extract(user_text):
+              return "simulation"
             error_id = str(uuid.uuid4())
             a_message = AssistantMessage(id=error_id, content="", role="assistant")
             self.state['state']["messages"].append(a_message)
             return "end"
+
+    def _append_extract_messages(self, tool_calls, message_id):
+        self.state['state']["messages"].append(
+            AssistantMessage(role="assistant", tool_calls=tool_calls, id=message_id)
+        )
+        for tc in tool_calls:
+            tool_call_id = tc["id"] if isinstance(tc, dict) else tc.id
+            self.state['state']["messages"].append(
+                ToolMessage(
+                    id=str(uuid.uuid4()),
+                    role="tool",
+                    tool_call_id=tool_call_id,
+                    content="Investment parameters extracted successfully",
+                )
+            )
+
+    def _continue_with_watchlist_extract(self, user_text=""):
+        raw_args = watchlist_extract_args(self.state, user_text)
+        if not raw_args:
+            return False
+        guarded = sanitize_extract_args(raw_args)
+        if not guarded.ok:
+            log_event(
+                self.state.get("run_id", "unknown"),
+                "extract_watchlist_fallback",
+                ok=False,
+                reason=guarded.reason,
+            )
+            return False
+        log_event(
+            self.state.get("run_id", "unknown"),
+            "extract_watchlist_fallback",
+            ok=True,
+            tickers=guarded.arguments["ticker_symbols"],
+            investment_date=guarded.arguments["investment_date"],
+            amounts=guarded.arguments["amount_of_dollars_to_be_invested"],
+            interval=guarded.arguments["interval_of_investment"],
+        )
+        print(
+            f"extract fallback: {guarded.arguments['ticker_symbols']} "
+            f"{guarded.arguments['amount_of_dollars_to_be_invested']} "
+            f"{guarded.arguments['interval_of_investment']} "
+            f"from {guarded.arguments['investment_date']}"
+        )
+        self._append_extract_messages(
+            [{
+                "id": str(uuid.uuid4()),
+                "type": "function",
+                "function": {
+                    "name": "extract_relevant_data_from_user_prompt",
+                    "arguments": json.dumps(guarded.arguments),
+                },
+            }],
+            str(uuid.uuid4()),
+        )
+        return True
     
     
     @listen("chat")
@@ -317,11 +410,16 @@ class StockAnalysisFlow(Flow):
         if "investment_summary" in arguments:
             print("Debug: Received final results, skipping simulation step")
             return "end"
-        
-        # Check if required keys exist in arguments
-        if "ticker_symbols" not in arguments or "amount_of_dollars_to_be_invested" not in arguments:
-            print(f"Error: Missing required keys in arguments. Available keys: {list(arguments.keys())}")
+
+        guarded = sanitize_extract_args(arguments)
+        if not guarded.ok:
+            log_event(
+                self.state.get("run_id", "unknown"),
+                "safety_tool_block",
+                reason=guarded.reason,
+            )
             return "end"
+        arguments = guarded.arguments
         
         # Create new investments list
         amounts = arguments["amount_of_dollars_to_be_invested"]
@@ -623,9 +721,9 @@ class StockAnalysisFlow(Flow):
             if interval == "single_shot":
                 # Step 4.10.1: For single-shot, only one purchase at first date
                 first_date = stock_data.index[0]
-                price = stock_data.loc[first_date][ticker]
-                shares_bought = holdings[ticker]
-                invested = shares_bought * price
+                price = finite_float(stock_data.loc[first_date][ticker], default=float("nan"))
+                shares_bought = finite_float(holdings.get(ticker, 0.0))
+                invested = 0.0 if not math.isfinite(price) else shares_bought * price
             else:
                 # Step 4.10.2: For DCA, sum all purchases from the log
                 invested = 0.0
@@ -637,14 +735,21 @@ class StockAnalysisFlow(Flow):
                             invested += float(cost_str)
                         except Exception:
                             pass
+            invested = finite_float(invested)
             total_invested_per_stock[ticker] = invested
             total_invested += invested
+        total_invested = finite_float(total_invested)
             
         # Step 4.11: Calculate percentage allocations and returns
         for ticker in all_tickers:
-            invested = total_invested_per_stock[ticker]
-            holding_value = holdings[ticker] * final_prices[ticker]  # Current value of holdings
-            returns[ticker] = holding_value - invested  # Absolute return
+            invested = finite_float(total_invested_per_stock.get(ticker, 0.0))
+            price_index = getattr(final_prices, "index", [])
+            final_price = (
+                finite_float(final_prices[ticker]) if ticker in price_index else 0.0
+            )
+            shares = finite_float(holdings.get(ticker, 0.0))
+            holding_value = shares * final_price
+            returns[ticker] = holding_value - invested
             total_value += holding_value
             
             # Calculate percentage allocation (what % of total investment went to this stock)
@@ -803,8 +908,8 @@ class StockAnalysisFlow(Flow):
             performanceData.append(
                 {
                     "date": str(date.date()),
-                    "portfolio": float(port_value) if port_value is not None else None,
-                    "spy": float(spy_val) if spy_val is not None else None,
+                    "portfolio": finite_float(port_value, default=None),
+                    "spy": finite_float(spy_val, default=None),
                 }
             )
 
@@ -818,11 +923,11 @@ class StockAnalysisFlow(Flow):
                 msg += f"On {d}, not enough cash for {t}: price ${p:.2f}, available ${c:.2f}\n"
         else:
             msg = "All investments were made successfully.\n"
-        msg += f"\nFinal portfolio value: ${total_value:.2f}\n"
+        msg += f"\nFinal portfolio value: ${finite_float(total_value):.2f}\n"
         msg += "Returns by ticker (percent and $):\n"
         for ticker in all_tickers:
-            percent = percent_return_per_stock[ticker]
-            abs_return = returns[ticker]
+            percent = finite_float(percent_return_per_stock.get(ticker))
+            abs_return = finite_float(returns.get(ticker))
             msg += f"{ticker}: {percent:.2f}% (${abs_return:.2f})\n"
 
         # Step 4.18: Add tool message indicating data extraction is complete
@@ -846,7 +951,12 @@ class StockAnalysisFlow(Flow):
                         "function": {
                             "name": "render_standard_charts_and_table",
                             "arguments": json.dumps(
-                                {"investment_summary": self.state['state']["investment_summary"]}
+                                {
+                                    "investment_summary": json_safe(
+                                        self.state['state']["investment_summary"]
+                                    )
+                                },
+                                allow_nan=False,
                             ),
                         },
                     }
@@ -937,14 +1047,15 @@ class StockAnalysisFlow(Flow):
         current_tickers = self.be_arguments['ticker_symbols']
         
         # Step 5.5: Call OpenAI to generate bull/bear insights
-        model = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        response = model.chat.completions.create(
+        response = traced_chat_completion(
+            self.state.get("run_id", "unknown"),
+            "insights",
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": insights_prompt},  # Custom insights prompt
-                {"role": "user", "content": json.dumps(current_tickers)},  # Send ticker list
+                {"role": "system", "content": insights_prompt},
+                {"role": "user", "content": json.dumps(current_tickers)},
             ],
-            tools=[generate_insights],  # Use insights generation tool
+            tools=[generate_insights],
         )
         
         # Step 5.6: Process the insights response
@@ -953,12 +1064,25 @@ class StockAnalysisFlow(Flow):
             args_dict = json.loads(last_assistant_message.tool_calls[0].function.arguments)
 
             # Step 5.6.2: Add the generated insights to the arguments
-            args_dict["insights"] = json.loads(
+            raw_insights = json.loads(
                 response.choices[0].message.tool_calls[0].function.arguments
             )
+            guarded = sanitize_insights(raw_insights)
+            if not guarded.ok:
+                log_event(
+                    self.state.get("run_id", "unknown"),
+                    "safety_output_block",
+                    reason=guarded.reason,
+                )
+                args_dict["insights"] = {}
+            else:
+                args_dict["insights"] = guarded.insights
 
             # Step 5.6.3: Update the tool call arguments with insights included
-            last_assistant_message.tool_calls[0].function.arguments = json.dumps(args_dict)
+            last_assistant_message.tool_calls[0].function.arguments = json.dumps(
+                json_safe(args_dict),
+                allow_nan=False,
+            )
         else:
             # Step 5.6.4: If insights generation failed, set empty insights
             self.state['state']["insights"] = {}
@@ -980,13 +1104,11 @@ class StockAnalysisFlow(Flow):
         await asyncio.sleep(0)
         return "end"  # All steps complete, proceed to end
     
-    @listen(or_("chat", "insights"))
+    @listen("insights")
     def end(self):
         """
-        Step 6: Final step - return the complete state
-        - This method is called from either 'chat' (if no investment data) 
-          or 'insights' (after successful analysis)
-        - Returns the final state with all analysis results
+        Step 6: Final step - return the complete state after insights.
+        Listening only to insights keeps kickoff from finishing as soon as chat ends.
         """
         return self.state
 
@@ -994,6 +1116,213 @@ class StockAnalysisFlow(Flow):
 # ===============================================================================
 # UTILITY FUNCTIONS
 # ===============================================================================
+
+def finite_float(value, default=0.0):
+    try:
+        if value is None:
+            return default
+        if pd.isna(value):
+            return default
+        number = float(value)
+    except (TypeError, ValueError):
+        return default
+    return number if math.isfinite(number) else default
+
+
+def json_safe(value):
+    if isinstance(value, dict):
+        return {str(key): json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+    if isinstance(value, (np.bool_, bool)):
+        return bool(value)
+    if isinstance(value, (np.integer, int)) and not isinstance(value, bool):
+        return int(value)
+    if isinstance(value, (np.floating, float)):
+        number = float(value)
+        return number if math.isfinite(number) else None
+    if isinstance(value, str):
+        return value
+    if value is None:
+        return None
+    try:
+        if pd.isna(value):
+            return None
+    except (TypeError, ValueError):
+        pass
+    if hasattr(value, "item"):
+        try:
+            return json_safe(value.item())
+        except Exception:
+            return str(value)
+    return value
+
+
+_MONTHS = {
+    "january": 1, "jan": 1, "february": 2, "feb": 2, "march": 3, "mar": 3,
+    "april": 4, "apr": 4, "may": 5, "june": 6, "jun": 6, "july": 7, "jul": 7,
+    "august": 8, "aug": 8, "september": 9, "sep": 9, "sept": 9,
+    "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
+}
+_TICKER_TOKEN = re.compile(r"\b[A-Za-z][A-Za-z0-9.]{0,9}\b")
+_TICKER_STOP = {
+    "A", "AN", "AND", "AT", "BEAR", "BULL", "CASE", "CASES", "COMPARE", "COST",
+    "DAILY", "DCA", "DONE", "DOLLAR", "EACH", "FOR", "FROM", "HAVE", "I", "IF",
+    "IN", "INTO", "INVEST", "INVESTED", "INVESTMENT", "LAST", "LUMP", "MONTH",
+    "MONTHLY", "MY", "OF", "ON", "ONLY", "OR", "PAST", "PORTFOLIO", "SHOW",
+    "SHOT", "SINCE", "SINGLE", "STOCK", "STOCKS", "SUM", "THE", "THESE", "THIS",
+    "THAT", "THOSE", "TO", "TRY", "USD", "USING", "WATCHLIST", "WHAT", "WITH",
+    "WOULD", "YEAR", "YEARS", "WEEKLY", "ANALYZE", "ANALYSE", "ANALYSIS",
+    "ABOUT", "JUST", "AVERAGING",
+} | {name.upper() for name in _MONTHS}
+
+
+def _shift_years(today, years):
+    try:
+        return today.replace(year=today.year - years)
+    except ValueError:
+        return date(today.year - years, 2, 28)
+
+
+def parse_amount_from_text(text):
+    if not text:
+        return None
+    dollar = re.search(
+        r"\$\s*(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*(k\b)?",
+        text,
+        re.I,
+    )
+    if dollar:
+        number = float(dollar.group(1).replace(",", ""))
+        if dollar.group(2):
+            number *= 1000
+        return number
+    thousand = re.search(r"\b(\d+(?:\.\d+)?)\s*(k|thousand)\b", text, re.I)
+    if thousand:
+        return float(thousand.group(1)) * 1000
+    dollars = re.search(
+        r"\b(\d{1,3}(?:,\d{3})+|\d+(?:\.\d+)?)\s*dollars\b",
+        text,
+        re.I,
+    )
+    if dollars:
+        return float(dollars.group(1).replace(",", ""))
+    return None
+
+
+def parse_date_from_text(text):
+    if not text:
+        return None
+    today = datetime.today().date()
+    lowered = text.lower()
+    if re.search(r"\b(last year|past year|since last year|the past year)\b", lowered):
+        return _shift_years(today, 1).isoformat()
+    years_ago = re.search(r"\b(\d+)\s+years?\s+ago\b", lowered)
+    if years_ago:
+        return _normalize_date(_shift_years(today, int(years_ago.group(1))).isoformat())
+    iso = re.search(r"\b(20\d{2}-\d{2}-\d{2})\b", text)
+    if iso:
+        return _normalize_date(iso.group(1))
+    named = re.search(
+        r"\b(" + "|".join(sorted(_MONTHS, key=len, reverse=True)) + r")\s+(\d{4})\b",
+        lowered,
+    )
+    if named:
+        month = _MONTHS[named.group(1)]
+        return _normalize_date(f"{int(named.group(2))}-{month:02d}-01")
+    year_only = re.search(r"\b(?:since|from|in)\s+(20\d{2})\b", lowered)
+    if year_only:
+        return _normalize_date(f"{year_only.group(1)}-01-01")
+    return None
+
+
+def parse_interval_from_text(text):
+    if not text:
+        return None
+    lowered = text.lower()
+    if re.search(r"\b(dca|dollar[-\s]?cost|monthly|every month|each month|1mo)\b", lowered):
+        return "1mo"
+    if re.search(r"\b(weekly|every week|each week)\b", lowered):
+        return "7d"
+    if re.search(r"\b(daily|every day)\b", lowered):
+        return "1d"
+    if re.search(r"\b(quarterly|every quarter)\b", lowered):
+        return "3mo"
+    if re.search(r"\b(single[-\s]?shot|lump sum|all at once)\b", lowered):
+        return "single_shot"
+    return None
+
+
+def parse_tickers_from_text(text, portfolio_tickers):
+    if not text:
+        return None
+    upper = text.upper()
+    mentioned = [
+        ticker
+        for ticker in portfolio_tickers
+        if re.search(rf"\b{re.escape(ticker)}\b", upper)
+    ]
+    extras = []
+    for token in _TICKER_TOKEN.findall(text):
+        ticker = _normalize_ticker(token)
+        if not ticker or ticker in _TICKER_STOP or ticker in mentioned:
+            continue
+        extras.append(ticker)
+    if mentioned or extras:
+        return mentioned + extras
+    return None
+
+
+def watchlist_extract_args(flow_state, user_text=""):
+    portfolio = flow_state.get("investment_portfolio")
+    nested = flow_state.get("state")
+    if portfolio is None and isinstance(nested, dict):
+        portfolio = nested.get("investment_portfolio")
+    if isinstance(portfolio, str):
+        try:
+            portfolio = json.loads(portfolio)
+        except json.JSONDecodeError:
+            return None
+    if not isinstance(portfolio, list) or not portfolio:
+        return None
+
+    portfolio_tickers = []
+    portfolio_amounts = {}
+    for item in portfolio:
+        if not isinstance(item, dict):
+            continue
+        ticker = item.get("ticker") or item.get("symbol")
+        if not ticker:
+            continue
+        ticker = str(ticker).upper()
+        portfolio_tickers.append(ticker)
+        try:
+            portfolio_amounts[ticker] = float(item.get("amount", 10_000))
+        except (TypeError, ValueError):
+            portfolio_amounts[ticker] = 10_000.0
+    if not portfolio_tickers:
+        return None
+
+    tickers = parse_tickers_from_text(user_text, portfolio_tickers) or portfolio_tickers
+    amount = parse_amount_from_text(user_text)
+    if amount is not None:
+        amounts = [amount] * len(tickers)
+    else:
+        amounts = [portfolio_amounts.get(ticker, 10_000.0) for ticker in tickers]
+
+    today = datetime.today().date()
+    investment_date = parse_date_from_text(user_text)
+    if not investment_date:
+        investment_date = _shift_years(today, 1).isoformat()
+
+    return {
+        "ticker_symbols": tickers,
+        "investment_date": investment_date,
+        "amount_of_dollars_to_be_invested": amounts,
+        "interval_of_investment": parse_interval_from_text(user_text) or "single_shot",
+        "to_be_added_in_portfolio": True,
+    }
+
 
 def convert_tool_call(tc):
     """
