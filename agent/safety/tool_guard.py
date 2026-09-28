@@ -8,9 +8,28 @@ MIN_AMOUNT = 100.0
 MAX_AMOUNT = 100_000.0
 MAX_LOOKBACK_YEARS = 4
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
+_MAX_EXTRACTED_TICKER_LEN = 5
 _ALLOWED_INTERVALS = {
     "1d", "5d", "7d", "1mo", "3mo", "6mo",
     "1y", "2y", "3y", "4y", "5y", "single_shot",
+}
+TICKER_STOP = {
+    "A", "ABOUT", "ADD", "ADDED", "AGO", "ALL", "AM", "AN", "AND", "ANALYZE",
+    "ANALYSE", "ANALYSIS", "ARE", "AS", "AT", "AVERAGING", "BE", "BEAR", "BULL",
+    "BUY", "BY", "CAN", "CASE", "CASES", "CASH", "COMPARE", "COST", "DAILY",
+    "DCA", "DID", "DO", "DOLLAR", "DOLLARS", "DONE", "EACH", "EVERY", "FOR",
+    "FROM", "FUND", "FUNDS", "GET", "GOT", "HAD", "HAS", "HAVE", "I", "IF",
+    "IN", "INTO", "INVEST", "INVESTED", "INVESTING", "INVESTMENT", "INVESTMENTS",
+    "IS", "IT", "ITS", "JAN", "JANUARY", "FEB", "FEBRUARY", "MAR", "MARCH",
+    "APR", "APRIL", "MAY", "JUN", "JUNE", "JUL", "JULY", "AUG", "AUGUST",
+    "SEP", "SEPT", "SEPTEMBER", "OCT", "OCTOBER", "NOV", "NOVEMBER", "DEC",
+    "DECEMBER", "JUST", "LAST", "LUMP", "ME", "MONTH", "MONTHLY", "MY", "NO",
+    "NOT", "OF", "OK", "ON", "ONLY", "OR", "PAST", "PER", "PLEASE", "PORTFOLIO",
+    "PUT", "QUARTER", "QUARTERLY", "SELL", "SHOW", "SHOT", "SIMULATE",
+    "SIMULATION", "SINCE", "SINGLE", "SO", "STOCK", "STOCKS", "SUM", "THANKS",
+    "THAT", "THE", "THESE", "THIS", "THOSE", "TO", "TRY", "UP", "USD", "USING",
+    "VS", "WATCHLIST", "WE", "WEEK", "WEEKLY", "WHAT", "WILL", "WITH", "WOULD",
+    "YEAR", "YEARLY", "YEARS", "YES", "YOU", "YOUR",
 }
 
 
@@ -26,6 +45,18 @@ def _normalize_ticker(raw: Any) -> str | None:
     if not _TICKER_RE.match(ticker):
         return None
     return ticker
+
+
+def is_extracted_ticker(raw: Any) -> str | None:
+    ticker = _normalize_ticker(raw)
+    if not ticker or ticker in TICKER_STOP:
+        return None
+    letters = ticker.replace(".", "")
+    if not (1 <= len(letters) <= _MAX_EXTRACTED_TICKER_LEN):
+        return None
+    return ticker
+
+
 def _normalize_amount(raw: Any) -> float | None:
     try:
         amount = float(raw)
@@ -53,7 +84,7 @@ def sanitize_extract_args(raw: Any) -> ToolGuardResult:
     tickers: list[str] = []
     seen: set[str] = set()
     for item in raw.get("ticker_symbols") or []:
-        ticker = _normalize_ticker(item)
+        ticker = is_extracted_ticker(item)
         if ticker and ticker not in seen:
             seen.add(ticker)
             tickers.append(ticker)

@@ -28,7 +28,11 @@ from observability.openai_traced import traced_chat_completion
 from observability.log import log_event
 from safety.input_guard import _last_user_text
 from safety.output_guard import sanitize_insights
-from safety.tool_guard import _normalize_date, _normalize_ticker, sanitize_extract_args
+from safety.tool_guard import (
+    _normalize_date,
+    is_extracted_ticker,
+    sanitize_extract_args,
+)
 
 # Load environment variables (like API keys) from .env file
 load_dotenv()
@@ -402,9 +406,9 @@ class StockAnalysisFlow(Flow):
         
         # Step 3.5: Create investment portfolio structure for UI display
         # Combine new investments with existing portfolio (additive approach)
-        existing_portfolio = self.state.get("investment_portfolio", [])
-        if isinstance(existing_portfolio, str):
-            existing_portfolio = json.loads(existing_portfolio)
+        existing_portfolio = _clean_portfolio(
+            self.state.get("investment_portfolio", [])
+        )
         
         # Check if this is the final results or initial parameters
         if "investment_summary" in arguments:
@@ -585,9 +589,9 @@ class StockAnalysisFlow(Flow):
         interval = args.get("interval_of_investment", "single_shot")
         
         # Get all tickers from combined portfolio
-        existing_portfolio = self.state.get("investment_portfolio", [])
-        if isinstance(existing_portfolio, str):
-            existing_portfolio = json.loads(existing_portfolio)
+        existing_portfolio = _clean_portfolio(
+            self.state.get("investment_portfolio", [])
+        )
         
         all_tickers = list(set(current_tickers + [inv["ticker"] for inv in existing_portfolio]))
         print(f"Debug: Processing allocation for all tickers: {all_tickers}")
@@ -600,10 +604,9 @@ class StockAnalysisFlow(Flow):
             total_cash = sum(amounts)
             
         # Step 4.6: Initialize tracking variables for simulation
-        # Get existing portfolio from state
-        existing_portfolio = self.state.get("investment_portfolio", [])
-        if isinstance(existing_portfolio, str):
-            existing_portfolio = json.loads(existing_portfolio)
+        existing_portfolio = _clean_portfolio(
+            self.state.get("investment_portfolio", [])
+        )
         
         # Initialize holdings with existing portfolio
         holdings = {}
@@ -1034,18 +1037,16 @@ class StockAnalysisFlow(Flow):
         )
         await asyncio.sleep(0)
         
-        # Step 5.4: Extract ticker symbols for insights analysis
-        # Check if this is the final results or initial parameters
-        try:
-            arguments = json.loads(last_assistant_message.tool_calls[0].function.arguments)
-            if "investment_summary" in arguments:
-                print("Debug: Received final results, skipping insights step")
-                return "end"
-        except (json.JSONDecodeError, KeyError, IndexError):
-            pass
-            
-        current_tickers = self.be_arguments['ticker_symbols']
-        
+        # Step 5.4: Use extract args from this run, and annotate the chart tool call
+        current_tickers = (getattr(self, "be_arguments", None) or {}).get(
+            "ticker_symbols"
+        ) or []
+        chart_message, chart_call, raw_args = _find_chart_tool_call(
+            self.state["state"]["messages"]
+        )
+        if not current_tickers or chart_call is None:
+            return "end"
+
         # Step 5.5: Call OpenAI to generate bull/bear insights
         response = traced_chat_completion(
             self.state.get("run_id", "unknown"),
@@ -1058,12 +1059,9 @@ class StockAnalysisFlow(Flow):
             tools=[generate_insights],
         )
         
-        # Step 5.6: Process the insights response
+        # Step 5.6: Merge insights into the chart payload the UI actually renders
+        args_dict = _parse_tool_args(raw_args)
         if response.choices[0].finish_reason == "tool_calls":
-            # Step 5.6.1: Extract existing arguments from chart rendering tool call
-            args_dict = json.loads(last_assistant_message.tool_calls[0].function.arguments)
-
-            # Step 5.6.2: Add the generated insights to the arguments
             raw_insights = json.loads(
                 response.choices[0].message.tool_calls[0].function.arguments
             )
@@ -1074,17 +1072,19 @@ class StockAnalysisFlow(Flow):
                     "safety_output_block",
                     reason=guarded.reason,
                 )
-                args_dict["insights"] = {}
+                insights = {}
             else:
-                args_dict["insights"] = guarded.insights
-
-            # Step 5.6.3: Update the tool call arguments with insights included
-            last_assistant_message.tool_calls[0].function.arguments = json.dumps(
-                json_safe(args_dict),
-                allow_nan=False,
-            )
+                insights = guarded.insights
+            args_dict["insights"] = insights
+            summary = args_dict.get("investment_summary")
+            if isinstance(summary, dict):
+                summary["insights"] = insights
+                args_dict["investment_summary"] = summary
+            payload = json.dumps(json_safe(args_dict), allow_nan=False)
+            _write_tool_call_args(chart_call, payload)
+            if chart_message is not last_assistant_message:
+                _write_tool_call_args(last_assistant_message.tool_calls[0], payload)
         else:
-            # Step 5.6.4: If insights generation failed, set empty insights
             self.state['state']["insights"] = {}
             
         # Step 5.7: Mark insights extraction as completed
@@ -1165,16 +1165,85 @@ _MONTHS = {
     "october": 10, "oct": 10, "november": 11, "nov": 11, "december": 12, "dec": 12,
 }
 _TICKER_TOKEN = re.compile(r"\b[A-Za-z][A-Za-z0-9.]{0,9}\b")
-_TICKER_STOP = {
-    "A", "AN", "AND", "AT", "BEAR", "BULL", "CASE", "CASES", "COMPARE", "COST",
-    "DAILY", "DCA", "DONE", "DOLLAR", "EACH", "FOR", "FROM", "HAVE", "I", "IF",
-    "IN", "INTO", "INVEST", "INVESTED", "INVESTMENT", "LAST", "LUMP", "MONTH",
-    "MONTHLY", "MY", "OF", "ON", "ONLY", "OR", "PAST", "PORTFOLIO", "SHOW",
-    "SHOT", "SINCE", "SINGLE", "STOCK", "STOCKS", "SUM", "THE", "THESE", "THIS",
-    "THAT", "THOSE", "TO", "TRY", "USD", "USING", "WATCHLIST", "WHAT", "WITH",
-    "WOULD", "YEAR", "YEARS", "WEEKLY", "ANALYZE", "ANALYSE", "ANALYSIS",
-    "ABOUT", "JUST", "AVERAGING",
-} | {name.upper() for name in _MONTHS}
+_WATCHLIST_RE = re.compile(
+    r"\b(my watchlist|the watchlist|these stocks|my portfolio|my stocks)\b",
+    re.I,
+)
+
+
+def _iter_tool_calls(message):
+    calls = getattr(message, "tool_calls", None)
+    if calls is None and isinstance(message, dict):
+        calls = message.get("tool_calls")
+    return calls or []
+
+
+def _function_name_and_args(tool_call):
+    if isinstance(tool_call, dict):
+        function = tool_call.get("function") or {}
+    else:
+        function = getattr(tool_call, "function", None) or {}
+    if isinstance(function, dict):
+        return function.get("name"), function.get("arguments")
+    return getattr(function, "name", None), getattr(function, "arguments", None)
+
+
+def _write_tool_call_args(tool_call, arguments_json):
+    if isinstance(tool_call, dict):
+        function = tool_call.setdefault("function", {})
+        if isinstance(function, dict):
+            function["arguments"] = arguments_json
+        else:
+            function.arguments = arguments_json
+        return
+    function = getattr(tool_call, "function", None)
+    if isinstance(function, dict):
+        function["arguments"] = arguments_json
+        return
+    if function is not None:
+        function.arguments = arguments_json
+
+
+def _parse_tool_args(raw_args):
+    if isinstance(raw_args, dict):
+        return dict(raw_args)
+    if not raw_args:
+        return {}
+    try:
+        parsed = json.loads(raw_args)
+    except (TypeError, json.JSONDecodeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _find_chart_tool_call(messages):
+    for message in reversed(messages or []):
+        for tool_call in _iter_tool_calls(message):
+            name, arguments = _function_name_and_args(tool_call)
+            if name == "render_standard_charts_and_table":
+                return message, tool_call, arguments
+    return None, None, None
+
+
+def _clean_portfolio(portfolio):
+    if isinstance(portfolio, str):
+        try:
+            portfolio = json.loads(portfolio)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(portfolio, list):
+        return []
+    cleaned = []
+    seen = set()
+    for item in portfolio:
+        if not isinstance(item, dict):
+            continue
+        ticker = is_extracted_ticker(item.get("ticker") or item.get("symbol"))
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        cleaned.append({**item, "ticker": ticker})
+    return cleaned
 
 
 def _shift_years(today, years):
@@ -1240,14 +1309,14 @@ def parse_interval_from_text(text):
     if not text:
         return None
     lowered = text.lower()
-    if re.search(r"\b(dca|dollar[-\s]?cost|monthly|every month|each month|1mo)\b", lowered):
-        return "1mo"
+    if re.search(r"\b(quarterly|every quarter)\b", lowered):
+        return "3mo"
     if re.search(r"\b(weekly|every week|each week)\b", lowered):
         return "7d"
     if re.search(r"\b(daily|every day)\b", lowered):
         return "1d"
-    if re.search(r"\b(quarterly|every quarter)\b", lowered):
-        return "3mo"
+    if re.search(r"\b(dca|dollar[-\s]?cost|monthly|every month|each month|1mo)\b", lowered):
+        return "1mo"
     if re.search(r"\b(single[-\s]?shot|lump sum|all at once)\b", lowered):
         return "single_shot"
     return None
@@ -1256,18 +1325,31 @@ def parse_interval_from_text(text):
 def parse_tickers_from_text(text, portfolio_tickers):
     if not text:
         return None
-    upper = text.upper()
-    mentioned = [
-        ticker
-        for ticker in portfolio_tickers
-        if re.search(rf"\b{re.escape(ticker)}\b", upper)
-    ]
+    portfolio_set = {
+        ticker for ticker in portfolio_tickers if is_extracted_ticker(ticker)
+    }
+    mentioned = []
     extras = []
+    seen = set()
     for token in _TICKER_TOKEN.findall(text):
-        ticker = _normalize_ticker(token)
-        if not ticker or ticker in _TICKER_STOP or ticker in mentioned:
+        ticker = is_extracted_ticker(token)
+        if not ticker or ticker in seen:
             continue
-        extras.append(ticker)
+        seen.add(ticker)
+        if ticker in portfolio_set:
+            mentioned.append(ticker)
+        else:
+            extras.append(ticker)
+    if _WATCHLIST_RE.search(text):
+        combined = []
+        seen = set()
+        for ticker in list(portfolio_tickers) + extras:
+            ticker = is_extracted_ticker(ticker)
+            if not ticker or ticker in seen:
+                continue
+            seen.add(ticker)
+            combined.append(ticker)
+        return combined or None
     if mentioned or extras:
         return mentioned + extras
     return None
@@ -1294,8 +1376,11 @@ def watchlist_extract_args(flow_state, user_text=""):
         ticker = item.get("ticker") or item.get("symbol")
         if not ticker:
             continue
-        ticker = str(ticker).upper()
-        portfolio_tickers.append(ticker)
+        ticker = is_extracted_ticker(ticker)
+        if not ticker:
+            continue
+        if ticker not in portfolio_tickers:
+            portfolio_tickers.append(ticker)
         try:
             portfolio_amounts[ticker] = float(item.get("amount", 10_000))
         except (TypeError, ValueError):
