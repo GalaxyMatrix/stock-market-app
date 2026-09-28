@@ -43,6 +43,11 @@ from copilotkit import CopilotKitState
 app = FastAPI()
 
 
+@app.get("/health")
+async def health():
+    return {"ok": True}
+
+
 # ===============================================================================
 # STATE MANAGEMENT
 # ===============================================================================
