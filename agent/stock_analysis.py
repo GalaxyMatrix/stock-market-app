@@ -31,6 +31,7 @@ from safety.output_guard import sanitize_insights
 from safety.tool_guard import (
     _normalize_date,
     is_extracted_ticker,
+    is_free_text_ticker,
     sanitize_extract_args,
 )
 
@@ -487,14 +488,31 @@ class StockAnalysisFlow(Flow):
             interval="3mo",  # Quarterly data points
         )
         
-        # Step 3.11: Extract closing prices and store data for next step
-        self.be_stock_data = data["Close"]  # Store closing prices DataFrame
-        self.be_arguments = arguments  # Store extracted arguments for next step
-        
-        # Check if stock data is empty
-        if self.be_stock_data.empty:
+        # Step 3.11: Keep only tickers that actually returned prices
+        close = None
+        if data is not None and not getattr(data, "empty", True):
+            try:
+                close = data["Close"]
+            except (KeyError, TypeError):
+                close = None
+        usable = _tickers_with_prices(close, all_tickers)
+        dropped = [ticker for ticker in all_tickers if ticker not in usable]
+        if dropped:
+            print(f"Dropping tickers with no price data: {dropped}")
+            log_event(
+                self.state.get("run_id", "unknown"),
+                "drop_unpriced_tickers",
+                dropped=dropped,
+                kept=usable,
+            )
+        if not usable:
             print("Warning: No stock data retrieved. This might be due to invalid tickers or date range.")
             return "end"
+
+        frame = _price_frame(close, usable)
+        self.be_stock_data = frame[usable]
+        arguments = _align_extract_args(arguments, usable)
+        self.be_arguments = arguments
         
         # Step 3.12: Mark stock data gathering as completed
         index = len(self.state['state']["tool_logs"]) - 1
@@ -1246,6 +1264,59 @@ def _clean_portfolio(portfolio):
     return cleaned
 
 
+def _price_frame(close, tickers):
+    if close is None:
+        return None
+    if isinstance(close, pd.Series):
+        name = close.name
+        if name not in tickers:
+            name = tickers[0] if len(tickers) == 1 else None
+        if not name:
+            return None
+        return close.to_frame(name=name)
+    if not isinstance(close, pd.DataFrame) or close.empty:
+        return None
+    return close
+
+
+def _tickers_with_prices(close, tickers):
+    frame = _price_frame(close, tickers)
+    if frame is None:
+        return []
+    usable = []
+    for ticker in tickers:
+        if ticker not in frame.columns:
+            continue
+        values = pd.to_numeric(frame[ticker], errors="coerce")
+        if values.dropna().empty:
+            continue
+        usable.append(ticker)
+    return usable
+
+
+def _align_extract_args(arguments, usable):
+    tickers = arguments.get("ticker_symbols") or []
+    amounts = arguments.get("amount_of_dollars_to_be_invested") or []
+    kept = []
+    kept_amounts = []
+    for index, ticker in enumerate(tickers):
+        if ticker not in usable:
+            continue
+        kept.append(ticker)
+        if index < len(amounts):
+            kept_amounts.append(amounts[index])
+    if not kept:
+        kept = list(usable)
+        kept_amounts = [10_000.0] * len(kept)
+    elif len(kept_amounts) != len(kept):
+        kept_amounts = [10_000.0] * len(kept)
+    return {
+        **arguments,
+        "ticker_symbols": kept,
+        "amount_of_dollars_to_be_invested": kept_amounts,
+    }
+
+
 def _shift_years(today, years):
     try:
         return today.replace(year=today.year - years)
@@ -1339,7 +1410,9 @@ def parse_tickers_from_text(text, portfolio_tickers):
         if ticker in portfolio_set:
             mentioned.append(ticker)
         else:
-            extras.append(ticker)
+            extra = is_free_text_ticker(token, allow=portfolio_set)
+            if extra:
+                extras.append(extra)
     if _WATCHLIST_RE.search(text):
         combined = []
         seen = set()

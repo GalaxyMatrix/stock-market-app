@@ -9,27 +9,29 @@ MAX_AMOUNT = 100_000.0
 MAX_LOOKBACK_YEARS = 4
 _TICKER_RE = re.compile(r"^[A-Z][A-Z0-9.]{0,9}$")
 _MAX_EXTRACTED_TICKER_LEN = 5
+_MIN_FREE_TEXT_TICKER_LEN = 3
 _ALLOWED_INTERVALS = {
     "1d", "5d", "7d", "1mo", "3mo", "6mo",
     "1y", "2y", "3y", "4y", "5y", "single_shot",
 }
 TICKER_STOP = {
-    "A", "ABOUT", "ADD", "ADDED", "AGO", "ALL", "AM", "AN", "AND", "ANALYZE",
-    "ANALYSE", "ANALYSIS", "ARE", "AS", "AT", "AVERAGING", "BE", "BEAR", "BULL",
-    "BUY", "BY", "CAN", "CASE", "CASES", "CASH", "COMPARE", "COST", "DAILY",
-    "DCA", "DID", "DO", "DOLLAR", "DOLLARS", "DONE", "EACH", "EVERY", "FOR",
-    "FROM", "FUND", "FUNDS", "GET", "GOT", "HAD", "HAS", "HAVE", "I", "IF",
-    "IN", "INTO", "INVEST", "INVESTED", "INVESTING", "INVESTMENT", "INVESTMENTS",
-    "IS", "IT", "ITS", "JAN", "JANUARY", "FEB", "FEBRUARY", "MAR", "MARCH",
-    "APR", "APRIL", "MAY", "JUN", "JUNE", "JUL", "JULY", "AUG", "AUGUST",
-    "SEP", "SEPT", "SEPTEMBER", "OCT", "OCTOBER", "NOV", "NOVEMBER", "DEC",
-    "DECEMBER", "JUST", "LAST", "LUMP", "ME", "MONTH", "MONTHLY", "MY", "NO",
-    "NOT", "OF", "OK", "ON", "ONLY", "OR", "PAST", "PER", "PLEASE", "PORTFOLIO",
-    "PUT", "QUARTER", "QUARTERLY", "SELL", "SHOW", "SHOT", "SIMULATE",
+    "A", "ABOUT", "ADD", "ADDED", "AGO", "AI", "ALL", "AM", "AN", "AND",
+    "ANALYSE", "ANALYZE", "ANALYSIS", "ARE", "AS", "AT", "AVERAGING", "BE", "BEAR", "BULL",
+    "BUY", "BY", "CA", "CAN", "CASE", "CASES", "CASH", "CEO", "COMPARE", "COST",
+    "DAILY", "DCA", "DID", "DO", "DOLLAR", "DOLLARS", "DONE", "EACH", "ETF",
+    "EU", "EVERY", "FOR", "FROM", "FUND", "FUNDS", "GET", "GOT", "HAD", "HAS",
+    "HAVE", "I", "ID", "IF", "IN", "INTO", "INVEST", "INVESTED", "INVESTING",
+    "INVESTMENT", "INVESTMENTS", "IPO", "IS", "IT", "ITS", "JAN", "JANUARY",
+    "FEB", "FEBRUARY", "MAR", "MARCH", "APR", "APRIL", "MAY", "JUN", "JUNE",
+    "JUL", "JULY", "AUG", "AUGUST", "SEP", "SEPT", "SEPTEMBER", "OCT",
+    "OCTOBER", "NOV", "NOVEMBER", "DEC", "DECEMBER", "JUST", "LAST", "LUMP",
+    "ME", "ML", "MONTH", "MONTHLY", "MY", "NAV", "NO", "NOT", "NY", "OF", "OK",
+    "ON", "ONLY", "OR", "PAST", "PER", "PLEASE", "PM", "PORTFOLIO", "PUT",
+    "QUARTER", "QUARTERLY", "RE", "SELL", "SHOW", "SHOT", "SIMULATE",
     "SIMULATION", "SINCE", "SINGLE", "SO", "STOCK", "STOCKS", "SUM", "THANKS",
-    "THAT", "THE", "THESE", "THIS", "THOSE", "TO", "TRY", "UP", "USD", "USING",
-    "VS", "WATCHLIST", "WE", "WEEK", "WEEKLY", "WHAT", "WILL", "WITH", "WOULD",
-    "YEAR", "YEARLY", "YEARS", "YES", "YOU", "YOUR",
+    "THAT", "THE", "THESE", "THIS", "THOSE", "TO", "TRY", "TV", "UK", "UP",
+    "US", "USD", "USING", "VS", "WATCHLIST", "WE", "WEEK", "WEEKLY", "WHAT",
+    "WILL", "WITH", "WOULD", "YEAR", "YEARLY", "YEARS", "YES", "YOU", "YOUR",
 }
 
 
@@ -53,6 +55,23 @@ def is_extracted_ticker(raw: Any) -> str | None:
         return None
     letters = ticker.replace(".", "")
     if not (1 <= len(letters) <= _MAX_EXTRACTED_TICKER_LEN):
+        return None
+    return ticker
+
+
+def is_free_text_ticker(raw: Any, allow: Any = None) -> str | None:
+    ticker = is_extracted_ticker(raw)
+    if not ticker:
+        return None
+    allowed = {
+        str(item).upper()
+        for item in (allow or [])
+        if item
+    }
+    if ticker in allowed:
+        return ticker
+    letters = ticker.replace(".", "")
+    if len(letters) < _MIN_FREE_TEXT_TICKER_LEN:
         return None
     return ticker
 
