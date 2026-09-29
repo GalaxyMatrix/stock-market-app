@@ -642,8 +642,19 @@ class StockAnalysisFlow(Flow):
         add_funds_needed = False  # Flag if more funds are needed
         add_funds_dates = []  # Dates when funds were insufficient
 
-        # Step 4.7: Ensure stock data is sorted chronologically
         stock_data = stock_data.sort_index()
+        if not isinstance(stock_data, pd.DataFrame) or stock_data.empty:
+            return "end"
+        stock_data = _flatten_price_columns(stock_data)
+        priced = [str(column) for column in stock_data.columns]
+        paired_amounts = list(zip(current_tickers, amounts))
+        current_tickers = [ticker for ticker in current_tickers if ticker in priced]
+        amounts = [amount for ticker, amount in paired_amounts if ticker in priced]
+        all_tickers = [ticker for ticker in all_tickers if ticker in priced]
+        if not current_tickers or not all_tickers:
+            print("Warning: No priced tickers available for allocation.")
+            return "end"
+        print(f"Debug: Processing allocation for priced tickers: {all_tickers}")
 
         # Step 4.8: Execute investment strategy based on interval
         if interval == "single_shot":
@@ -653,10 +664,10 @@ class StockAnalysisFlow(Flow):
             
             # Loop through each ticker and attempt to buy allocated amount
             for idx, ticker in enumerate(current_tickers):
-                price = row[ticker]
+                price = _row_price(row, ticker)
                 
                 # Step 4.8.1: Check if price data is available
-                if np.isnan(price):
+                if not math.isfinite(price):
                     investment_log.append(
                         f"{first_date.date()}: No price data for {ticker}, could not invest."
                     )
@@ -701,10 +712,10 @@ class StockAnalysisFlow(Flow):
             # DOLLAR-COST AVERAGING (DCA) STRATEGY: Spread investments over time
             for date, row in stock_data.iterrows():
                 for i, ticker in enumerate(current_tickers):
-                    price = row[ticker]
+                    price = _row_price(row, ticker)
                     
                     # Step 4.8.5: Skip if no price data available
-                    if np.isnan(price):
+                    if not math.isfinite(price):
                         continue  # skip if price is NaN
                         
                     # Step 4.8.6: Invest as much as possible for this ticker at this date
@@ -742,7 +753,7 @@ class StockAnalysisFlow(Flow):
             if interval == "single_shot":
                 # Step 4.10.1: For single-shot, only one purchase at first date
                 first_date = stock_data.index[0]
-                price = finite_float(stock_data.loc[first_date][ticker], default=float("nan"))
+                price = _row_price(stock_data.loc[first_date], ticker)
                 shares_bought = finite_float(holdings.get(ticker, 0.0))
                 invested = 0.0 if not math.isfinite(price) else shares_bought * price
             else:
@@ -899,11 +910,12 @@ class StockAnalysisFlow(Flow):
             # Step 4.15.1: Calculate portfolio value at each date
             port_value = (
                 sum(
-                    running_holdings[t] * stock_data.loc[date][t]
+                    running_holdings[t] * price
                     for t in all_tickers
-                    if t in running_holdings and not pd.isna(stock_data.loc[date][t])
+                    if t in running_holdings
+                    for price in [_row_price(stock_data.loc[date], t)]
+                    if math.isfinite(price)
                 )
-                # Note: Not adding cash here since we want pure investment performance
             )
             
             # Step 4.15.2: Calculate SPY value at each date
@@ -1264,19 +1276,64 @@ def _clean_portfolio(portfolio):
     return cleaned
 
 
+def _column_ticker(name):
+    if isinstance(name, tuple):
+        parts = [
+            str(part).upper()
+            for part in name
+            if str(part).upper() not in {"", "CLOSE", "ADJ CLOSE", "ADJCLOSE", "OPEN", "HIGH", "LOW", "VOLUME", "PRICE", "TICKER"}
+        ]
+        return parts[-1] if parts else str(name[-1]).upper()
+    return str(name).upper()
+
+
+def _flatten_price_columns(frame):
+    if frame is None or not isinstance(frame, pd.DataFrame) or frame.empty:
+        return frame
+    picked = []
+    names = []
+    seen = set()
+    for column in frame.columns:
+        ticker = _column_ticker(column)
+        if not ticker or ticker in seen:
+            continue
+        seen.add(ticker)
+        picked.append(column)
+        names.append(ticker)
+    if not picked:
+        return frame
+    out = frame.loc[:, picked].copy()
+    out.columns = names
+    return out
+
+
 def _price_frame(close, tickers):
     if close is None:
         return None
     if isinstance(close, pd.Series):
-        name = close.name
-        if name not in tickers:
+        name = _column_ticker(close.name)
+        if name not in {str(ticker).upper() for ticker in tickers}:
             name = tickers[0] if len(tickers) == 1 else None
         if not name:
             return None
-        return close.to_frame(name=name)
+        return close.to_frame(name=str(name).upper())
     if not isinstance(close, pd.DataFrame) or close.empty:
         return None
-    return close
+    return _flatten_price_columns(close)
+
+
+def _series_price(values):
+    if isinstance(values, pd.DataFrame):
+        values = values.iloc[:, 0]
+    return pd.to_numeric(values, errors="coerce")
+
+
+def _row_price(row, ticker):
+    if isinstance(row, pd.DataFrame):
+        row = row.iloc[0]
+    if ticker not in getattr(row, "index", []):
+        return float("nan")
+    return finite_float(row[ticker], default=float("nan"))
 
 
 def _tickers_with_prices(close, tickers):
@@ -1287,7 +1344,7 @@ def _tickers_with_prices(close, tickers):
     for ticker in tickers:
         if ticker not in frame.columns:
             continue
-        values = pd.to_numeric(frame[ticker], errors="coerce")
+        values = _series_price(frame[ticker])
         if values.dropna().empty:
             continue
         usable.append(ticker)
