@@ -40,7 +40,9 @@ const WatchlistButton = ({
     } else {
       // Roll back optimistic UI if the server rejected the change
       setAdded(added);
-      toast.error(result.error || "Failed to update watchlist");
+      toast.error(
+        "error" in result ? result.error : "Failed to update watchlist"
+      );
     }
   };
 

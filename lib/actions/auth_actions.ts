@@ -1,4 +1,5 @@
 'use server'; 
+import { headers } from "next/headers";
 import {auth} from '@/lib/better-auth/auth'
 import {inngest} from "@/lib/inngest/client";
 

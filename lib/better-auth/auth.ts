@@ -13,7 +13,7 @@ export const getAuthInstance = async () => {
 
     if (!db) throw new Error("Failed to connect to database");
 
-    authInstance = betterAuth({
+    const instance = betterAuth({
         database: mongodbAdapter(db as any) , 
 
         secret: process.env.BETTER_AUTH_SECRET,
@@ -28,13 +28,10 @@ export const getAuthInstance = async () => {
 
         },
         plugins: [nextCookies()],
-        
-
-
     });
 
-    return authInstance;
-
+    authInstance = instance as unknown as ReturnType<typeof betterAuth>;
+    return instance;
 }
 
 

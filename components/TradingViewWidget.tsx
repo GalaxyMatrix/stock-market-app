@@ -6,11 +6,11 @@ import React, { useEffect, useRef, memo } from 'react';
 import { cn } from '@/lib/utils';
 
 interface TradingViewWidgetProps {
-  title: string;
+  title?: string;
   scriptUrl: string;
   config: Record<string, unknown>;
-  height: number;
-  className: string;
+  height?: number;
+  className?: string;
 }
 
 const TradingViewWidget= ({title, scriptUrl, config, height=600, className}: TradingViewWidgetProps) =>  {
