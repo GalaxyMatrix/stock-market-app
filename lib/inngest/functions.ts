@@ -203,7 +203,7 @@ export const checkPriceAlerts = inngest.createFunction(
         id: 'check-price-alerts',
         triggers: [
             { event: 'app/check.price.alerts' },
-            { cron: '* * * * *' },
+            { cron: '*/5 13-20 * * 1-5' },
         ],
     },
     async ({ step }) => {
