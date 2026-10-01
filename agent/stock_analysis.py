@@ -157,6 +157,64 @@ generate_insights = {
   }
 }
 
+_INSIGHT_RE = re.compile(
+    r"\b(insights?|what(?:'s| is) going on|overview|bull(?:ish)?|bear(?:ish)?|tell me about|how is|how are)\b",
+    re.I,
+)
+_SIMULATE_RE = re.compile(
+    r"\b(invest|simulate|simulation|allocat|backtest|portfolio|since|dollar|dollars)\b|\$\s*\d",
+    re.I,
+)
+_COMPANY_TICKERS = {
+    "apple": "AAPL",
+    "microsoft": "MSFT",
+    "google": "GOOGL",
+    "alphabet": "GOOGL",
+    "amazon": "AMZN",
+    "tesla": "TSLA",
+    "nvidia": "NVDA",
+    "meta": "META",
+    "facebook": "META",
+    "netflix": "NFLX",
+}
+
+
+def is_insight_request(text):
+    if not text or not _INSIGHT_RE.search(text):
+        return False
+    return _SIMULATE_RE.search(text) is None
+
+
+def tickers_for_insight(text):
+    found = []
+    seen = set()
+    lowered = text.lower()
+    for name, ticker in _COMPANY_TICKERS.items():
+        if re.search(rf"\b{re.escape(name)}\b", lowered) and ticker not in seen:
+            seen.add(ticker)
+            found.append(ticker)
+    for token in re.findall(r"\b[A-Z]{1,5}(?:\.[A-Z])?\b", text):
+        ticker = is_extracted_ticker(token)
+        if ticker and ticker not in seen:
+            seen.add(ticker)
+            found.append(ticker)
+    return found
+
+
+def format_insights(tickers, insights):
+    lines = [f"Insights for {', '.join(tickers)}", ""]
+    for label, key in (("Bull case", "bullInsights"), ("Bear case", "bearInsights")):
+        items = insights.get(key) or []
+        if not items:
+            continue
+        lines.append(label)
+        for item in items:
+            lines.append(f"{item['emoji']} {item['title']} — {item['description']}")
+        lines.append("")
+    lines.append("Educational context only. Not a recommendation to buy or sell.")
+    return "\n".join(lines).strip()
+
+
 
 class StockAnalysisFlow(Flow):
 
@@ -168,6 +226,43 @@ class StockAnalysisFlow(Flow):
             )
             + f"\n\nTODAY'S DATE: {datetime.today().strftime('%Y-%m-%d')}"
         )
+    
+    def _reply(self, content):
+        self.state['state']["messages"].append(
+            AssistantMessage(id=str(uuid.uuid4()), role="assistant", content=content)
+        )
+    
+    def _answer_insights(self, user_text):
+        tickers = tickers_for_insight(user_text)
+        if not tickers:
+            self._reply("Name a company or ticker, for example: give me insights into Apple.")
+            return True
+
+        response = traced_chat_completion(
+            self.state.get("run_id", "unknown"),
+            "insights",
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": insights_prompt},
+                {"role": "user", "content": json.dumps(tickers)},
+            ],
+            tools=[generate_insights],
+            tool_choice={"type": "function", "function": {"name": "generate_insights"}},
+        )
+        message = response.choices[0].message
+        if response.choices[0].finish_reason != "tool_calls" or not message.tool_calls:
+            self._reply(f"I couldn't build insights for {', '.join(tickers)}.")
+            return True
+        raw = json.loads(message.tool_calls[0].function.arguments)
+        guarded = sanitize_insights(raw)
+        if not guarded.ok:
+            self._reply(f"I couldn't build insights for {', '.join(tickers)}.")
+            return True
+        
+        self._reply(format_insights(tickers, guarded.insights))
+        return True 
+    
+
 
     @start()
     def start(self):
@@ -215,6 +310,10 @@ class StockAnalysisFlow(Flow):
           await asyncio.sleep(0)
 
           user_text = _last_user_text(self.state['state']['messages'])
+          if is_insight_request(user_text) and self._answer_insights(user_text):
+            self.state["skip_simulation"] = True
+            return "end"
+
           response = traced_chat_completion(
             self.state.get("run_id", "unknown"),
             "extract",
@@ -360,6 +459,9 @@ class StockAnalysisFlow(Flow):
         - Download historical stock price data from Yahoo Finance
         - Prepare data for portfolio simulation
         """
+        if self.state.get("skip_simulation"):
+            return "end"
+
         # Step 3.1: Ensure we have tool calls with investment data
         # Find the last AssistantMessage with tool calls
         last_assistant_message = None
@@ -543,6 +645,9 @@ class StockAnalysisFlow(Flow):
         - Compare portfolio performance against SPY (S&P 500) benchmark
         - Generate performance data for charting
         """
+        if self.state.get("skip_simulation"):
+            return "end"
+
         # Step 4.1: Ensure we have tool calls with investment data
         # Find the last AssistantMessage with tool calls
         last_assistant_message = None
@@ -1027,6 +1132,9 @@ class StockAnalysisFlow(Flow):
         - Use OpenAI to generate positive and negative analysis
         - Add insights to the investment summary for balanced perspective
         """
+        if self.state.get("skip_simulation"):
+            return "end"
+
         # Step 5.1: Ensure we have tool calls from previous step
         # Find the last AssistantMessage with tool calls
         last_assistant_message = None

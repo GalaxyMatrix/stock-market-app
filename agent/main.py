@@ -27,8 +27,6 @@ from ag_ui.core import (
 )
 from ag_ui.encoder import EventEncoder  # Encoder for converting events to streamable format
 
-# Import our custom stock analysis workflow
-from stock_analysis import StockAnalysisFlow
 from safety.input_guard import check_messages
 from observability.log import log_event
 
@@ -188,6 +186,8 @@ async def crewai_agent(input_data: RunAgentInput):
                     )
                 )
                 return
+
+            from stock_analysis import StockAnalysisFlow
 
             agent_task = asyncio.create_task(
                 StockAnalysisFlow().kickoff_async(inputs={
