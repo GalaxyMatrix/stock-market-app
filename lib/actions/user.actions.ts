@@ -9,7 +9,7 @@ export const getAllUsersForNewsEmail = async () => {
         if (!db) throw new Error('Failed to connect to MongoDB');
 
         const users = await db.collection('user').find(
-            {email: {$exists: true, $ne: null}},
+            {email: {$exists: true, $ne: null}, newsEmailOptOut: {$ne: true}},
             {projection: {_id: 1, id: 1, email: 1, name: 1, country: 1}}
         ).toArray()
 

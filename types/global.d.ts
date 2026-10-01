@@ -80,6 +80,7 @@ declare global {
         email: string;
         date: string;
         newsContent: string;
+        unsubscribeUrl: string;
     };
 
     type User = {

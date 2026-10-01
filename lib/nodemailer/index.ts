@@ -1,4 +1,5 @@
 import nodemailer from 'nodemailer';
+import { APP_URL } from '@/lib/news-email';
 import {
     NEWS_SUMMARY_EMAIL_TEMPLATE,
     WELCOME_EMAIL_TEMPLATE,
@@ -34,10 +35,13 @@ export const sendNewsSummaryEmail = async ({
     email,
     date,
     newsContent,
+    unsubscribeUrl,
 }: NewsSummaryEmailData) => {
     const htmlTemplate = NEWS_SUMMARY_EMAIL_TEMPLATE
         .replace('{{date}}', date)
-        .replace('{{newsContent}}', newsContent);
+        .replace('{{newsContent}}', newsContent)
+        .replace('{{unsubscribeUrl}}', unsubscribeUrl)
+        .replace('{{dashboardUrl}}', APP_URL);
 
     await transporter.sendMail({
         from: '"Signalist" <signalist.dev@gmail.com>',

@@ -6,6 +6,7 @@ import { getWatchlistSymbolsByEmail } from "../actions/watchlist.actions";
 import { getActiveAlertsForCron } from "../actions/alert.actions";
 import { getNews, getStocksDetails, getStockVolumeData } from "../actions/finnhub.actions";
 import { getFormattedTodayDate, getFrequencyWindowMs, formatPrice } from "@/lib/utils";
+import { buildUnsubscribeUrl } from "@/lib/news-email";
 import { connectToDatabase } from "@/database/mongoose";
 import { Alert } from "@/database/models/alert.model";
 
@@ -176,6 +177,7 @@ export const sendDailyNewsSummary = inngest.createFunction(
                         email: item.user.email,
                         date,
                         newsContent: item.newsContent,
+                        unsubscribeUrl: buildUnsubscribeUrl(item.user.email),
                     })
                 )
             );
