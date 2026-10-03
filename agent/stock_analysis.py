@@ -165,17 +165,13 @@ _SIMULATE_RE = re.compile(
     r"\b(invest|simulate|simulation|allocat|backtest|portfolio|since|dollar|dollars)\b|\$\s*\d",
     re.I,
 )
-_COMPANY_TICKERS = {
-    "apple": "AAPL",
-    "microsoft": "MSFT",
-    "google": "GOOGL",
-    "alphabet": "GOOGL",
-    "amazon": "AMZN",
-    "tesla": "TSLA",
-    "nvidia": "NVDA",
-    "meta": "META",
-    "facebook": "META",
-    "netflix": "NFLX",
+
+
+_INSIGHT_FILLER = {
+    "a", "an", "about", "and", "are", "bear", "bearish", "bull", "bullish",
+    "company", "for", "give", "going", "how", "insight", "insights", "into",
+    "is", "me", "of", "on", "overview", "please", "stock", "stocks", "tell",
+    "the", "what", "whats", "with",
 }
 
 
@@ -185,20 +181,71 @@ def is_insight_request(text):
     return _SIMULATE_RE.search(text) is None
 
 
-def tickers_for_insight(text):
+def _search_ticker(query):
+    query = " ".join(query.split())
+    if len(query) < 2:
+        return None
+    try:
+        quotes = yf.Search(query, max_results=5).quotes or []
+    except Exception:
+        return None
+    for quote in quotes:
+        if not isinstance(quote, dict):
+            continue
+        if str(quote.get("quoteType", "")).upper() not in {"EQUITY", "ETF"}:
+            continue
+        ticker = is_extracted_ticker(quote.get("symbol"))
+        if ticker:
+            return ticker
+    return None
+
+
+def _portfolio_tickers(flow_state):
+    portfolio = flow_state.get("investment_portfolio") or [] 
+    if isinstance(portfolio, str):
+        try:
+            portfolio = json.loads(portfolio)
+        except json.JSONDecodeError:
+            return [] 
+    
+    tickers = []
+    for item in portfolio if isinstance(portfolio, list) else []:
+        if not isinstance(item, dict):
+            continue
+        ticker = is_extracted_ticker(item.get("ticker") or item.get("symbol"))
+        if ticker and ticker not in tickers:
+            tickers.append(ticker)
+    return tickers
+
+
+def tickers_for_insight(text, portfolio_tickers):
     found = []
     seen = set()
     lowered = text.lower()
-    for name, ticker in _COMPANY_TICKERS.items():
-        if re.search(rf"\b{re.escape(name)}\b", lowered) and ticker not in seen:
-            seen.add(ticker)
-            found.append(ticker)
-    for token in re.findall(r"\b[A-Z]{1,5}(?:\.[A-Z])?\b", text):
+    portfolio_set = {ticker.upper() for ticker in portfolio_tickers}
+    if re.search(r"\b(my watchlist|the watchlist|these stocks|my portfolio)\b", lowered):
+        return list(portfolio_tickers)
+    for token in re.findall(r"\b[A-Za-z]{1,5}(?:\.[A-Za-z])?\b", text):
+        if token.lower() in _INSIGHT_FILLER:
+            continue
         ticker = is_extracted_ticker(token)
+        if not ticker or ticker not in portfolio_set or ticker in seen:
+            continue
+        seen.add(ticker)
+        found.append(ticker)
+    if found:
+        return found
+    words = [
+        word for word in re.findall(r"[A-Za-z][A-Za-z.&'-]*", text)
+        if word.lower() not in _INSIGHT_FILLER
+    ]
+    for part in re.split(r"\band\b|,", " ".join(words), flags=re.I):
+        ticker = _search_ticker(part)
         if ticker and ticker not in seen:
             seen.add(ticker)
             found.append(ticker)
     return found
+
 
 
 def format_insights(tickers, insights):
@@ -233,7 +280,7 @@ class StockAnalysisFlow(Flow):
         )
     
     def _answer_insights(self, user_text):
-        tickers = tickers_for_insight(user_text)
+        tickers = tickers_for_insight(user_text, _portfolio_tickers(self.state))
         if not tickers:
             self._reply("Name a company or ticker, for example: give me insights into Apple.")
             return True
@@ -250,12 +297,23 @@ class StockAnalysisFlow(Flow):
             tool_choice={"type": "function", "function": {"name": "generate_insights"}},
         )
         message = response.choices[0].message
-        if response.choices[0].finish_reason != "tool_calls" or not message.tool_calls:
+        if not message.tool_calls:
+            print(
+                "insights rejected: no tool call "
+                f"finish_reason={response.choices[0].finish_reason}"
+            )
             self._reply(f"I couldn't build insights for {', '.join(tickers)}.")
             return True
-        raw = json.loads(message.tool_calls[0].function.arguments)
+        arguments = message.tool_calls[0].function.arguments
+        try:
+            raw = json.loads(arguments) if isinstance(arguments, str) else arguments
+        except json.JSONDecodeError:
+            print("insights rejected: invalid tool arguments")
+            self._reply(f"I couldn't build insights for {', '.join(tickers)}.")
+            return True
         guarded = sanitize_insights(raw)
         if not guarded.ok:
+            print(f"insights rejected: {guarded.reason}")
             self._reply(f"I couldn't build insights for {', '.join(tickers)}.")
             return True
         

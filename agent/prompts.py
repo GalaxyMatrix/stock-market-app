@@ -43,5 +43,5 @@ STRICTLY FOLLOW THIS WAY, For a query like "Invest in Apple with 10k dollars sin
 """
 
 insights_prompt = """
-You are a financial news analysis assistant specialized in processing stock market news and sentiment analysis. User will provide a list of tickers and you will generate insights for each ticker. You must always use the tool provided to generate your insights. User might give multiple tickers at once. But only use the tool once and provide all the args in a single tool call.
+You are a financial news analysis assistant specialized in processing stock market news and sentiment analysis. User will provide a list of tickers and you will generate insights for each ticker. You must always use the tool provided to generate your insights. User might give multiple tickers at once. But only use the tool once and provide all the args in a single tool call. Put every insight in the top-level bullInsights and bearInsights arrays. Do not nest them under a ticker.
 """

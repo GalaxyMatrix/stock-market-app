@@ -40,14 +40,60 @@ def _clean_text(value, limit: int) -> str:
     return text[:limit]
 
 
+def _first_text(item: dict, keys: tuple[str, ...]) -> str:
+    for key in keys:
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return ""
+
+
+def _named_list(payload: dict, keys: tuple[str, ...]) -> list:
+    for key in keys:
+        value = payload.get(key)
+        if isinstance(value, list) and value:
+            return value
+    return []
+
+
+def _flatten_insight_payload(raw: Any) -> Any:
+    if not isinstance(raw, dict):
+        return raw
+    bull_keys = ("bullInsights", "bull_insights", "bulls", "positiveInsights")
+    bear_keys = ("bearInsights", "bear_insights", "bears", "negativeInsights")
+    bulls = _named_list(raw, bull_keys)
+    bears = _named_list(raw, bear_keys)
+    if not bulls and not bears:
+        for value in raw.values():
+            if not isinstance(value, dict):
+                continue
+            bulls.extend(_named_list(value, bull_keys))
+            bears.extend(_named_list(value, bear_keys))
+    if bulls or bears:
+        return {"bullInsights": bulls, "bearInsights": bears}
+    return raw
+
+
 def _item_ok(item: Any) -> dict[str, str] | None:
+    if isinstance(item, str):
+        text = _clean_text(item, MAX_DESCRIPTION)
+        if not text:
+            return None
+        item = {"title": text, "description": text}
     if not isinstance(item, dict):
         return None
     cleaned = {
-        "title": _clean_text(item.get("title"), MAX_TITLE),
-        "description": _clean_text(item.get("description"), MAX_DESCRIPTION),
+        "title": _clean_text(_first_text(item, ("title", "heading", "name")), MAX_TITLE),
+        "description": _clean_text(
+            _first_text(item, ("description", "text", "insight", "summary")),
+            MAX_DESCRIPTION,
+        ),
         "emoji": _clean_text(item.get("emoji"), 8) or "•",
     }
+    if cleaned["title"] and not cleaned["description"]:
+        cleaned["description"] = cleaned["title"]
+    if cleaned["description"] and not cleaned["title"]:
+        cleaned["title"] = _clean_text(cleaned["description"], MAX_TITLE)
     if not cleaned["title"] or not cleaned["description"]:
         return None
     blob = f"{cleaned['title']} {cleaned['description']}".lower()
@@ -65,9 +111,9 @@ def _item_ok(item: Any) -> dict[str, str] | None:
 
 
 def sanitize_insights(raw) -> OutputGuardResult:
+    raw = _flatten_insight_payload(raw)
     if not isinstance(raw, dict):
         return OutputGuardResult(ok=False, insights={}, reason="not_object")
-    
 
     bulls = [_item_ok(item) for item in _as_list(raw.get("bullInsights"))]
     bears = [_item_ok(item) for item in _as_list(raw.get("bearInsights"))]
