@@ -150,7 +150,7 @@ export const sendDailyNewsSummary = inngest.createFunction(
 
             const prompt = NEWS_SUMMARY_EMAIL_PROMPT.replace("{{newsData}}", newsData);
             const response = await step.ai.infer(toNewsStepId(item.user), {
-                model: step.ai.models.gemini({ model: "gemini-2.5-flash" }),
+                model: step.ai.models.gemini({ model: "gemini-3.1-flash-lite" }),
                 body: {
                     contents: [
                         {
