@@ -158,7 +158,7 @@ generate_insights = {
 }
 
 _INSIGHT_RE = re.compile(
-    r"\b(insights?|what(?:'s| is) going on|overview|bull(?:ish)?|bear(?:ish)?|tell me about|how is|how are)\b",
+    r"\b(insights?|analy[sz]e|what(?:'s| is) going on|overview|bull(?:ish)?|bear(?:ish)?|tell me about|how is|how are)\b",
     re.I,
 )
 _SIMULATE_RE = re.compile(
@@ -168,7 +168,7 @@ _SIMULATE_RE = re.compile(
 
 
 _INSIGHT_FILLER = {
-    "a", "an", "about", "and", "are", "bear", "bearish", "bull", "bullish",
+    "a", "an", "about", "analyse", "analyze", "and", "are", "bear", "bearish", "bull", "bullish",
     "company", "for", "give", "going", "how", "insight", "insights", "into",
     "is", "me", "of", "on", "overview", "please", "stock", "stocks", "tell",
     "the", "what", "whats", "with",
