@@ -6,6 +6,7 @@ import { getStockRiskAnalytics } from "@/lib/actions/finnhub.actions";
 import { getChangeColorClass } from "@/lib/utils";
 import RiskScoreCard from "@/components/RiskScoreCard";
 import RiskMetricGrid from "@/components/RiskMetricGrid";
+import MonteCarloCard from "@/components/MonteCarloCard";
 
 const WIDGET_BASE = "https://s3.tradingview.com/external-embedding/embed-widget-";
 
@@ -52,6 +53,8 @@ const RiskAnalyticsPage = async ({ params }: StockDetailsPageProps) => {
       </div>
 
       <RiskMetricGrid data={data} />
+
+      <MonteCarloCard data={data} />
 
       <TradingViewWidget
         title="Price history"

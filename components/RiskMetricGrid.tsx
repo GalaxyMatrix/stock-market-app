@@ -24,16 +24,6 @@ const METRICS = (data: StockRiskAnalytics) => [
     hint: "Worst peak-to-trough loss",
   },
   {
-    label: "VaR 95% (1 day)",
-    value: fmtPct(data.var95, 2),
-    hint: "Typical bad day",
-  },
-  {
-    label: "CVaR 95%",
-    value: fmtPct(data.cvar95, 2),
-    hint: "Average of days worse than VaR",
-  },
-  {
     label: "Sharpe",
     value: fmtNum(data.sharpe),
     hint: "Return per unit of total risk (rf 4%)",

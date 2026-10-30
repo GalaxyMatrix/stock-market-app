@@ -269,6 +269,19 @@ declare global {
 
     type RiskLabel = 'Low' | 'Medium' | 'High';
 
+    type MonteCarloSimulation = {
+        symbol: string;
+        horizonDays: number;
+        paths: number;
+        p5: number[];
+        p50: number[];
+        p95: number[];
+        endPriceP5: number;
+        endPriceP50: number;
+        endPriceP95: number;
+        probabilityOfLoss: number;
+    };
+
     type StockRiskAnalytics = {
         symbol: string;
         company: string;
@@ -281,8 +294,6 @@ declare global {
         computedBeta: number | null;
         finnhubBeta: number | null;
         maxDrawdown: number | null;
-        var95: number | null;
-        cvar95: number | null;
         sharpe: number | null;
         sortino: number | null;
         distanceFrom52wHigh: number | null;
@@ -291,6 +302,7 @@ declare global {
         riskLabel: RiskLabel | null;
         summary: string;
         limited: boolean;
+        monteCarlo: MonteCarloSimulation | null;
     };
 }
 

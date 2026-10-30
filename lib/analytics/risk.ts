@@ -68,26 +68,7 @@ export function maxDrawdown(closes: number[]): number {
 }
 
 
-function percentile(sortedAsc: number[], p: number): number {
-    if (sortedAsc.length === 0) return NaN;
-    const idx = (sortedAsc.length - 1) * p;
-    const lo = Math.floor(idx);
-    const hi = Math.ceil(idx);
-    if (lo === hi) return sortedAsc[lo];
-    return sortedAsc[lo] + (sortedAsc[hi] - sortedAsc[lo]) * (idx - lo);
-  }
-
-
-  export function historicalVaR(returns: number[], confidence = 0.95): number {
-    const sorted = [...returns].sort((a, b) => a - b);
-    return percentile(sorted, 1 - confidence);
-  }
-  export function historicalCVaR(returns: number[], confidence = 0.95): number {
-    const cutoff = historicalVaR(returns, confidence);
-    const tail = returns.filter((r) => r <= cutoff);
-    return mean(tail);
-  }
-  export function sharpeRatio(returns: number[], rf = RISK_FREE_RATE): number {
+export function sharpeRatio(returns: number[], rf = RISK_FREE_RATE): number {
     const vol = annualizedVolatility(returns);
     if (!Number.isFinite(vol) || vol === 0) return NaN;
     return (mean(returns) * TRADING_DAYS - rf) / vol;
@@ -127,13 +108,15 @@ function percentile(sortedAsc: number[], p: number): number {
     vol: number | null;
     beta: number | null;
     maxDd: number | null;
-    var95: number | null;
+    tailReturn: number | null;
   }): number | null {
     const parts: number[] = [];
     if (input.vol != null) parts.push(Math.min(input.vol / 0.2, 2) * 30);
     if (input.beta != null) parts.push(Math.min(Math.abs(input.beta) / 1, 2) * 20);
     if (input.maxDd != null) parts.push(Math.min(Math.abs(input.maxDd) / 0.3, 2) * 30);
-    if (input.var95 != null) parts.push(Math.min(Math.abs(input.var95) / 0.03, 2) * 20);
+    if (input.tailReturn != null) {
+      parts.push(Math.min(Math.abs(input.tailReturn) / 0.3, 2) * 20);
+    }
     if (parts.length === 0) return null;
     const raw = parts.reduce((a, b) => a + b, 0);
     const max = [30, 20, 30, 20].slice(0, parts.length).reduce((a, b) => a + b, 0);
@@ -174,8 +157,6 @@ function percentile(sortedAsc: number[], p: number): number {
     const limited = returns.length < MIN_RETURNS;
     const vol = finiteOrNull(annualizedVolatility(returns));
     const dd = finiteOrNull(maxDrawdown(input.closes));
-    const var95 = finiteOrNull(historicalVaR(returns));
-    const cvar95 = finiteOrNull(historicalCVaR(returns));
     const sharpe = finiteOrNull(sharpeRatio(returns));
     const sortino = finiteOrNull(sortinoRatio(returns));
     let computedBeta: number | null = null;
@@ -185,21 +166,14 @@ function percentile(sortedAsc: number[], p: number): number {
     const highFromCloses = input.closes.length > 0 ? Math.max(...input.closes) : NaN;
     const high = input.week52High ?? highFromCloses;
     const distance = finiteOrNull(distanceFromHigh(input.currentPrice, high));
-    const score = limited
-      ? null
-      : riskScore({ vol, beta: computedBeta, maxDd: dd, var95 });
     return {
       sampleDays: returns.length,
       annualizedVolatility: vol,
       computedBeta,
       maxDrawdown: dd,
-      var95,
-      cvar95,
       sharpe,
       sortino,
       distanceFrom52wHigh: distance,
-      riskScore: score,
-      riskLabel: riskLabel(score),
       limited,
     };
   }

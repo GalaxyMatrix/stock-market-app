@@ -7,7 +7,7 @@ import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 import { auth } from "@/lib/better-auth/auth";
 import { getWatchlistSymbolsByEmail } from "@/lib/actions/watchlist.actions"
-import { alignClosesByTimestamp, buildRiskSummary, computeRiskMetrics } from '@/lib/analytics/risk';
+import { alignClosesByTimestamp, buildRiskSummary, computeRiskMetrics, riskLabel, riskScore } from '@/lib/analytics/risk';
 
 const FINNHUB_BASE_URL = 'https://finnhub.io/api/v1';
 const NEXT_PUBLIC_FINNHUB_API_KEY = process.env.NEXT_PUBLIC_FINNHUB_API_KEY ?? '';
@@ -312,6 +312,53 @@ export const getStocksDetails = cache(async (symbol: string) => {
   }
 });
 
+const monteCarloUrl =
+  process.env.MONTE_CARLO_URL || "http://127.0.0.1:8000/monte-carlo";
+
+function isMonteCarloSimulation(value: unknown): value is MonteCarloSimulation {
+  if (!value || typeof value !== "object") return false;
+  const data = value as MonteCarloSimulation;
+  return (
+    Array.isArray(data.p5) &&
+    Array.isArray(data.p50) &&
+    Array.isArray(data.p95) &&
+    Number.isFinite(data.endPriceP5) &&
+    Number.isFinite(data.endPriceP50) &&
+    Number.isFinite(data.endPriceP95) &&
+    Number.isFinite(data.probabilityOfLoss) &&
+    Number.isFinite(data.horizonDays) &&
+    Number.isFinite(data.paths)
+  );
+}
+
+async function fetchMonteCarlo(
+  symbol: string,
+  spot: number,
+  closes: number[]
+): Promise<MonteCarloSimulation | null> {
+  if (closes.length < 61 || !(spot > 0)) return null;
+  try {
+    const res = await fetch(monteCarloUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol,
+        spot,
+        closes,
+        horizonDays: 252,
+        paths: 2000,
+      }),
+      cache: "no-store",
+    });
+    if (!res.ok) return null;
+    const payload = await res.json();
+    return isMonteCarloSimulation(payload) ? payload : null;
+  } catch (error) {
+    console.error(`Error fetching Monte Carlo for ${symbol}:`, error);
+    return null;
+  }
+}
+
 export const getStockRiskAnalytics = cache(async (symbol: string): Promise<StockRiskAnalytics | null> => {
   const cleanSymbol = symbol.trim().toUpperCase();
   const token = process.env.FINNHUB_API_KEY ?? NEXT_PUBLIC_FINNHUB_API_KEY;
@@ -378,8 +425,9 @@ export const getStockRiskAnalytics = cache(async (symbol: string): Promise<Stock
       financialsData?.metric?.['52WeekHigh'] ??
       (closes.length ? Math.max(...closes) : undefined);
 
+    const closesForSim = alignedStock.length ? alignedStock : closes;
     const metrics = computeRiskMetrics({
-      closes: alignedStock.length ? alignedStock : closes,
+      closes: closesForSim,
       marketCloses: alignedMarket,
       currentPrice: quoteData.c,
       week52High,
@@ -387,6 +435,18 @@ export const getStockRiskAnalytics = cache(async (symbol: string): Promise<Stock
 
     const finnhubBeta = financialsData?.metric?.beta ?? null;
     const changePercent = quoteData.dp || 0;
+    const monteCarlo = await fetchMonteCarlo(cleanSymbol, quoteData.c, closesForSim);
+    const tailReturn =
+      monteCarlo != null ? monteCarlo.endPriceP5 / quoteData.c - 1 : null;
+    const score = metrics.limited
+      ? null
+      : riskScore({
+          vol: metrics.annualizedVolatility,
+          beta: metrics.computedBeta ?? finnhubBeta,
+          maxDd: metrics.maxDrawdown,
+          tailReturn,
+        });
+    const label = riskLabel(score);
 
     return {
       symbol: cleanSymbol,
@@ -398,9 +458,12 @@ export const getStockRiskAnalytics = cache(async (symbol: string): Promise<Stock
       finnhubBeta,
       week52High: week52High ?? null,
       ...metrics,
+      monteCarlo,
+      riskScore: score,
+      riskLabel: label,
       summary: buildRiskSummary({
         symbol: cleanSymbol,
-        label: metrics.riskLabel,
+        label,
         vol: metrics.annualizedVolatility,
         beta: metrics.computedBeta ?? finnhubBeta,
         maxDd: metrics.maxDrawdown,
