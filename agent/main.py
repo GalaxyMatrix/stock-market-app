@@ -1,5 +1,5 @@
 # FastAPI framework for building the web API
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.responses import StreamingResponse  # For streaming real-time responses to client
 
 # Standard Python libraries
@@ -29,6 +29,7 @@ from ag_ui.encoder import EventEncoder  # Encoder for converting events to strea
 
 from safety.input_guard import check_messages
 from observability.log import log_event
+from monte_carlo import MonteCarloRequest, run_monte_carlo
 
 # CopilotKit state management
 from copilotkit import CopilotKitState
@@ -44,6 +45,14 @@ app = FastAPI()
 @app.get("/health")
 async def health():
     return {"ok": True}
+
+
+@app.post("/monte-carlo")
+async def monte_carlo(req: MonteCarloRequest):
+    try:
+        return run_monte_carlo(req)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 # ===============================================================================

@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = "==3.12.*"
 
 [[package]]
@@ -2163,6 +2163,7 @@ dependencies = [
     { name = "copilotkit" },
     { name = "crewai" },
     { name = "fastapi" },
+    { name = "numpy" },
     { name = "pandas" },
     { name = "pybase64" },
     { name = "python-dotenv" },
@@ -2176,6 +2177,7 @@ requires-dist = [
     { name = "copilotkit", specifier = ">=0.1.52,<0.2.0" },
     { name = "crewai", specifier = ">=0.140.0,<0.141.0" },
     { name = "fastapi", specifier = ">=0.115.14,<0.116.0" },
+    { name = "numpy", specifier = ">=2.0.0,<3.0.0" },
     { name = "pandas", specifier = ">=2.3.0,<3.0.0" },
     { name = "pybase64", specifier = ">=1.4.1,<2.0.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
