@@ -30,6 +30,7 @@ from ag_ui.encoder import EventEncoder  # Encoder for converting events to strea
 from safety.input_guard import check_messages
 from observability.log import log_event
 from monte_carlo import MonteCarloRequest, run_monte_carlo
+from watchlist_mcp import mcp
 
 # CopilotKit state management
 from copilotkit import CopilotKitState
@@ -38,8 +39,8 @@ from copilotkit import CopilotKitState
 # APPLICATION SETUP
 # ===============================================================================
 
-# Initialize FastAPI application instance
-app = FastAPI()
+mcp_app = mcp.http_app(path="/")
+app = FastAPI(lifespan=mcp_app.lifespan)
 
 
 @app.get("/health")
@@ -79,7 +80,8 @@ class AgentState(CopilotKitState):
     be_arguments: dict            
     available_cash: int           
     investment_summary: dict      
-    tool_logs: list              
+    tool_logs: list
+    price_alerts: list
 
 # ===============================================================================
 # MAIN API ENDPOINT
@@ -147,6 +149,7 @@ async def crewai_agent(input_data: RunAgentInput):
                         "available_cash": input_data.state["available_cash"],        # Current cash balance
                         "investment_summary": input_data.state["investment_summary"], # Previous analysis results
                         "investment_portfolio": input_data.state["investment_portfolio"], # Current holdings
+                        "price_alerts": input_data.state.get("price_alerts") or [],
                         "tool_logs": []  # Reset tool logs for new analysis
                     }
                 )
@@ -160,7 +163,8 @@ async def crewai_agent(input_data: RunAgentInput):
                 be_arguments = None,
                 available_cash = input_data.state["available_cash"],
                 investment_portfolio = input_data.state["investment_portfolio"],
-                tool_logs = []
+                tool_logs = [],
+                price_alerts = input_data.state.get("price_alerts") or [],
             )
 
             guard = check_messages(input_data.messages)
@@ -203,6 +207,7 @@ async def crewai_agent(input_data: RunAgentInput):
                     "state" : state,
                     "emit_event" : emit_event,
                     "investment_portfolio" : input_data.state["investment_portfolio"],
+                    "price_alerts": input_data.state.get("price_alerts") or [],
                     "run_id": run_id,
                 })
             )
@@ -365,6 +370,9 @@ async def crewai_agent(input_data: RunAgentInput):
     # Step 11: Return streaming response to client
     # Step 11: Return streaming response to client
     return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+app.mount("/mcp", mcp_app)
 
 
 # ===============================================================================

@@ -48,7 +48,16 @@ const Watchlist = async () => {
               <SearchCommand initialStocks={initialStocks} />
             </div>
             <WatchlistTable watchlist={watchlist} />
-            <WatchlistChat symbols={symbols} />
+            <WatchlistChat
+              symbols={symbols}
+              alerts={alerts.map((a) => ({
+                symbol: a.symbol,
+                alertName: a.alertName,
+                alertType: a.alertType,
+                threshold: a.threshold,
+                frequency: a.frequency,
+              }))}
+            />
           </div>
         </section>
         <AlertsList

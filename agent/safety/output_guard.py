@@ -130,3 +130,25 @@ DISCLAIMER = (
     "Past performance does not predict future results."
 )
 
+
+def sanitize_text_reply(text: str, limit: int = 6000) -> str:
+    cleaned = " ".join(str(text or "").split())
+    if not cleaned:
+        return ""
+    for pattern in _PROMPT_LEAK:
+        if re.search(pattern, cleaned, flags=re.IGNORECASE):
+            return (
+                "I ran the market tools, but I can't show that response. "
+                + DISCLAIMER
+            )
+    for pattern in _ADVICE:
+        if re.search(pattern, cleaned, flags=re.IGNORECASE):
+            cleaned = (
+                cleaned.rstrip(".")
+                + ". Educational context only — not a recommendation to buy or sell."
+            )
+            break
+    if DISCLAIMER not in cleaned:
+        cleaned = f"{cleaned}\n\n{DISCLAIMER}"
+    return cleaned[:limit]
+

@@ -12,7 +12,21 @@ import InvestmentAnalysisCard, {
   parseInvestmentSummary,
 } from "@/components/InvestmentAnalysisCard";
 
-function ChatInner({ symbols }: { symbols: string[] }) {
+type WatchlistChatAlert = {
+  symbol: string;
+  alertName: string;
+  alertType: string;
+  threshold: number;
+  frequency: string;
+};
+
+function ChatInner({
+  symbols,
+  alerts,
+}: {
+  symbols: string[];
+  alerts: WatchlistChatAlert[];
+}) {
   useCoAgent({
     name: "crewaiAgent",
     initialState: {
@@ -22,6 +36,7 @@ function ChatInner({ symbols }: { symbols: string[] }) {
         ticker,
         amount: 10_000,
       })),
+      price_alerts: alerts,
     },
   });
 
@@ -58,13 +73,19 @@ function ChatInner({ symbols }: { symbols: string[] }) {
       defaultOpen={false}
       labels={{
         title: "Portfolio agent",
-        initial: `I can analyze your watchlist: ${symbols.join(", ")}. Try "Analyze my watchlist with $10k each since last year".`,
+        initial: `I can analyze your watchlist: ${symbols.join(", ")}. Try "Analyze my watchlist with $10k each since last year", or ask for news, quotes, risk, or alerts.`,
       }}
     />
   );
 }
 
-export default function WatchlistChat({ symbols }: { symbols: string[] }) {
+export default function WatchlistChat({
+  symbols,
+  alerts,
+}: {
+  symbols: string[];
+  alerts: WatchlistChatAlert[];
+}) {
   return (
     <CopilotKit
       runtimeUrl="/api/copilotkit"
@@ -72,7 +93,7 @@ export default function WatchlistChat({ symbols }: { symbols: string[] }) {
       useSingleEndpoint
       showDevConsole={false}
     >
-      <ChatInner symbols={symbols} />
+      <ChatInner symbols={symbols} alerts={alerts} />
     </CopilotKit>
   );
 }

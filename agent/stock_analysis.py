@@ -27,13 +27,14 @@ from prompts import system_prompt, insights_prompt
 from observability.openai_traced import traced_chat_completion
 from observability.log import log_event
 from safety.input_guard import _last_user_text
-from safety.output_guard import sanitize_insights
+from safety.output_guard import sanitize_insights, sanitize_text_reply
 from safety.tool_guard import (
     _normalize_date,
     is_extracted_ticker,
     is_free_text_ticker,
     sanitize_extract_args,
 )
+from watchlist_mcp import call_tool, openai_tools, set_chat_context
 
 # Load environment variables (like API keys) from .env file
 load_dotenv()
@@ -165,6 +166,12 @@ _SIMULATE_RE = re.compile(
     r"\b(invest|simulate|simulation|allocat|backtest|portfolio|since|dollar|dollars)\b|\$\s*\d",
     re.I,
 )
+_MCP_RE = re.compile(
+    r"\b(news|headline|headlines|quote|trading|close[d]? at|"
+    r"risk(?:y)?|volatility|sharpe|drawdown|beta|"
+    r"alerts?|price alert)\b",
+    re.I,
+)
 
 
 _INSIGHT_FILLER = {
@@ -179,6 +186,10 @@ def is_insight_request(text):
     if not text or not _INSIGHT_RE.search(text):
         return False
     return _SIMULATE_RE.search(text) is None
+
+
+def is_mcp_request(text):
+    return bool(text and _MCP_RE.search(text) and not _SIMULATE_RE.search(text))
 
 
 def _search_ticker(query):
@@ -318,9 +329,105 @@ class StockAnalysisFlow(Flow):
             return True
         
         self._reply(format_insights(tickers, guarded.insights))
-        return True 
-    
+        return True
 
+    async def _answer_with_mcp(self, user_text):
+        set_chat_context(
+            tickers=_portfolio_tickers(self.state),
+            alerts=self.state.get("price_alerts") or [],
+        )
+        try:
+            tools = await openai_tools()
+        except Exception as exc:
+            log_event(
+                self.state.get("run_id", "unknown"),
+                "mcp_list_tools",
+                ok=False,
+                error=str(exc)[:300],
+            )
+            return False
+        if not tools:
+            return False
+
+        tickers = _portfolio_tickers(self.state)
+        messages = [
+            {
+                "role": "system",
+                "content": (
+                    "You answer with get_watchlist_news, get_quote, "
+                    "get_risk_metrics, and list_price_alerts. "
+                    "Call a tool when you need a fact. "
+                    "Do not tell the user what to buy or sell. "
+                    f"Watchlist tickers: {', '.join(tickers) or 'none'}."
+                ),
+            },
+            {"role": "user", "content": user_text},
+        ]
+
+        for round_index in range(4):
+            response = traced_chat_completion(
+                self.state.get("run_id", "unknown"),
+                "mcp",
+                model="gpt-4o-mini",
+                messages=messages,
+                tools=tools,
+                tool_choice="auto",
+            )
+            message = response.choices[0].message
+            calls = getattr(message, "tool_calls", None) or []
+            if not calls:
+                reply = sanitize_text_reply(message.content or "")
+                if not reply:
+                    return False
+                self._reply(reply)
+                return True
+
+            messages.append(
+                {
+                    "role": "assistant",
+                    "content": message.content or "",
+                    "tool_calls": [
+                        {
+                            "id": call.id,
+                            "type": "function",
+                            "function": {
+                                "name": call.function.name,
+                                "arguments": call.function.arguments,
+                            },
+                        }
+                        for call in calls
+                    ],
+                }
+            )
+            for call in calls:
+                try:
+                    args = json.loads(call.function.arguments or "{}")
+                except json.JSONDecodeError:
+                    args = {}
+                if not isinstance(args, dict):
+                    args = {}
+                log_event(
+                    self.state.get("run_id", "unknown"),
+                    "mcp_call",
+                    round=round_index,
+                    tool=call.function.name,
+                )
+                result = await call_tool(call.function.name, args)
+                messages.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "content": result,
+                    }
+                )
+
+        self._reply(
+            sanitize_text_reply(
+                "I ran the market tools but could not finish. "
+                "Try one ticker, for example: latest news for AAPL."
+            )
+        )
+        return True
 
     @start()
     def start(self):
@@ -368,6 +475,9 @@ class StockAnalysisFlow(Flow):
           await asyncio.sleep(0)
 
           user_text = _last_user_text(self.state['state']['messages'])
+          if is_mcp_request(user_text) and await self._answer_with_mcp(user_text):
+            self.state["skip_simulation"] = True
+            return "end"
           if is_insight_request(user_text) and self._answer_insights(user_text):
             self.state["skip_simulation"] = True
             return "end"
